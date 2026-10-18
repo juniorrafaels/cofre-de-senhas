@@ -1,0 +1,13 @@
+# Configuração LOCAL e OPCIONAL do Cargo — não é necessária para compilar o Cofre.
+#
+# Para usá-la, copie este arquivo para `src-tauri/.cargo/config.toml` (que é ignorado pelo Git)
+# e ajuste o caminho. Uso típico: manter a pasta de build do Rust (vários GB) fora de uma pasta
+# sincronizada (OneDrive, Dropbox), o que deixa o build mais rápido e evita sincronizar binários.
+#
+# Alternativa sem arquivo: definir a variável de ambiente CARGO_TARGET_DIR, por exemplo
+#   PowerShell:  $env:CARGO_TARGET_DIR = "$env:LOCALAPPDATA\cargo-target\cofre-de-contas"
+#
+# Sem nenhuma das duas, o Cargo usa `src-tauri/target/` (já ignorado pelo Git).
+
+[build]
+# target-dir = "C:/caminho/fora/do/onedrive/cofre-de-contas"

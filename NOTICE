@@ -1,0 +1,15 @@
+Cofre de Contas
+Copyright 2026 Os autores do Cofre de Contas
+
+Licenciado sob a Apache License, Version 2.0 (ver LICENSE).
+
+Este produto inclui software de terceiros, distribuído sob suas próprias licenças (MIT,
+Apache-2.0, BSD, ISC, MPL-2.0, BSL-1.0, Unicode-3.0, Zlib, entre outras). As dependências e suas
+versões exatas estão em src-tauri/Cargo.lock e package-lock.json.
+
+Os logotipos de plataformas de terceiros em src-tauri/resources/default-platform-images/
+(Instagram, Facebook, Threads, X, TikTok, YouTube, Gmail, Outlook, Discord, Telegram, LinkedIn,
+Pinterest, Reddit, Kwai, Substack, Mastodon, Truth Social e nostr) são marcas de seus
+respectivos titulares. NÃO estão cobertos pela licença deste projeto e são usados apenas para
+identificar visualmente as plataformas. O Cofre de Contas não tem afiliação com nenhuma dessas
+empresas nem endosso delas. Ver docs/ASSETS.md.

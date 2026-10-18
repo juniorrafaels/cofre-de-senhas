@@ -1,0 +1,101 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Executável permanente gerado por "npm run release" (não deve ser versionado), e os resources
+# (ex.: imagens padrão das plataformas) que o script copia ao lado dele para que o .exe portátil
+# encontre os mesmos assets que já estão versionados em src-tauri/resources/
+/Cofre de Contas.exe
+/.Cofre de Contas.exe.tmp
+/resources
+
+# Builds, instaladores e símbolos de depuração gerados (Rust/Tauri/Windows).
+# O Cargo já é ignorado em src-tauri/.gitignore (/target/); estas regras cobrem cópias soltas.
+target/
+release/
+*.exe
+*.msi
+*.msix
+*.appx
+*.pdb
+*.dll
+*.nsis.zip
+*.msi.zip
+*.sig
+
+# Dados do cofre — NUNCA versionar. O app grava o banco real em %APPDATA%\<identifier>\, fora do
+# repositório; estas regras evitam que uma cópia, backup ou export caia aqui por engano.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*-wal
+*-shm
+*.vaultbackup
+*.bak
+*.backup
+*.old
+COFRE_BACKUP*/
+# Kit de recuperação "impresso" em PDF ou exports salvos na raiz do projeto
+/*.pdf
+/*.csv
+
+# Segredos, certificados e chaves (assinatura de código, updater do Tauri, etc.)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+*.crt
+*.jks
+*.keystore
+.tauri/
+*.private
+*.secret
+
+# Configuração local do Cargo (ex.: target-dir fora do OneDrive). Ver config.toml.example.
+src-tauri/.cargo/config.toml
+
+# Ferramentas de IA / configuração local de agentes
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Caches e temporários
+.cache/
+.vite/
+.eslintcache
+.tsbuildinfo
+*.tsbuildinfo
+coverage/
+*.tmp
+*.temp
+~$*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+Thumbs.db
+desktop.ini
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

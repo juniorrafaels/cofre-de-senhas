@@ -1,0 +1,138 @@
+# Integração contínua do Cofre de Contas.
+#
+# Valida, em uma máquina Windows limpa do GitHub, que o projeto instala, passa nos testes e compila
+# sem depender da máquina de desenvolvimento. NÃO publica releases, NÃO envia instaladores para
+# lugar nenhum e não usa segredos.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Testes e build (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependências (lockfile)
+        run: npm ci
+
+      - name: TypeScript
+        run: npx tsc --noEmit
+
+      - name: Testes do frontend (Vitest)
+        run: npm test
+
+      - name: Build do frontend
+        run: npm run build
+
+      - name: Testes do backend (Rust)
+        working-directory: src-tauri
+        run: cargo test --lib --locked
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets
+
+      # Compila o app de produção (frontend embutido + Rust release) sem gerar instaladores.
+      # O binário fica só no runner, não é publicado.
+      - name: Build Tauri (sem instaladores)
+        run: npx tauri build --no-bundle
+
+  # Só roda quando disparado à mão (Actions → CI → Run workflow). Gera os instaladores numa máquina
+  # limpa do GitHub — os binários não carregam caminhos da máquina de desenvolvimento — e os anexa
+  # ao run como artefato temporário, junto com os hashes SHA-256, para conferência. NÃO cria
+  # release nem publica nada.
+  installers:
+    name: Instaladores para conferência (manual)
+    if: github.event_name == 'workflow_dispatch'
+    needs: test-and-build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Build Tauri (MSI + NSIS)
+        run: npx tauri build
+
+      - name: Hashes SHA-256
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem src-tauri/target/release/bundle -Recurse -Include *.msi, *-setup.exe
+          $files | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
+            Set-Content -Encoding utf8 src-tauri/target/release/bundle/SHA256SUMS.txt
+          Get-Content src-tauri/target/release/bundle/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instaladores-${{ github.sha }}
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/SHA256SUMS.txt
+          retention-days: 7
+
+  audit:
+    name: Auditoria de dependências
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Só as dependências que vão para o app. Alertas de ferramentas de build aparecem no
+      # `npm audit` completo, que roda abaixo sem bloquear o CI.
+      - name: npm audit (produção)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: npm audit (completo, informativo)
+        run: npm audit || true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit

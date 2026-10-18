@@ -1,0 +1,10 @@
+# Configuração do `cargo audit` (RustSec). Cada exceção abaixo é uma decisão consciente,
+# documentada em SECURITY.md. Revise a cada release.
+[advisories]
+ignore = [
+    # sharks 0.5.0 — viés nos coeficientes do polinômio do Shamir (sem versão corrigida).
+    # Usado SOMENTE para recuperar cofres que já tinham perguntas de segurança cadastradas antes
+    # da descontinuação do recurso. Criar ou alterar perguntas está bloqueado no backend
+    # (security_questions.rs). Remover junto com o suporte legado às perguntas.
+    "RUSTSEC-2024-0398",
+]
