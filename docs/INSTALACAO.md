@@ -34,9 +34,9 @@ duas opções:
    - Existe também um `.msi` (`Cofre-de-Contas_0.1.0_x64_en-US.msi`), que instala para **todos os
      usuários** do computador e pede senha de administrador. Para uso pessoal, prefira o
      `-setup.exe`.
-   - **Versões beta:** o nome do `-setup.exe` leva a versão completa
-     (`Cofre-de-Contas_0.1.0-beta.2_x64-setup.exe`) e o `.msi` leva a forma numérica do Windows
-     Installer (`Cofre-de-Contas_0.1.0.2_x64_en-US.msi`, o `.2` é o número do beta).
+   - **Versões beta:** os nomes levam a versão completa
+     (`Cofre-de-Contas_0.1.0-beta.2_x64-setup.exe` e `Cofre-de-Contas_0.1.0-beta.2_x64_en-US.msi`);
+     a forma numérica do Windows Installer (`0.1.0.2`) fica só nos metadados do `.msi`.
    - A `v0.1.0-beta.1` é uma exceção: foi publicada antes da automação, como um ZIP
      (`instaladores-<commit>.zip`) que contém os instaladores com o nome gerado pelo Tauri
      (`Cofre de Contas_0.1.0_x64-setup.exe`, com espaços). A partir da próxima versão os arquivos

@@ -101,10 +101,10 @@ describe('checkVersions', () => {
     }
   });
 
-  it('estado atual do repositório: v0.1.0-beta.2 confere; outras tags exigem preparar a versão antes', () => {
-    expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.2'))).toEqual([]);
+  it('estado atual do repositório: v0.1.0-beta.3 confere; outras tags exigem preparar a versão antes', () => {
+    expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.3'))).toEqual([]);
     expect(checkVersions(repoRoot, parseTag('v0.1.0')).length).toBeGreaterThan(0);
-    expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.3')).length).toBeGreaterThan(0);
+    expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.2')).length).toBeGreaterThan(0);
   });
 });
 
@@ -166,7 +166,7 @@ describe('prepareReleaseAssets', () => {
     const run = (n) => {
       const bundleDir = fakeBundle({
         nsis: `Cofre de Contas_0.1.0-beta.${n}_x64-setup.exe`,
-        msi: `Cofre de Contas_0.1.0.${n}_x64_en-US.msi`,
+        msi: `Cofre de Contas_0.1.0-beta.${n}_x64_en-US.msi`,
       });
       const tag = parseTag(`v0.1.0-beta.${n}`);
       return prepareReleaseAssets({
@@ -179,7 +179,7 @@ describe('prepareReleaseAssets', () => {
     const beta1 = run(1);
     const beta2 = run(2);
     expect(beta1).toContain('Cofre-de-Contas_0.1.0-beta.1_x64-setup.exe');
-    expect(beta2).toContain('Cofre-de-Contas_0.1.0.2_x64_en-US.msi');
+    expect(beta2).toContain('Cofre-de-Contas_0.1.0-beta.2_x64_en-US.msi');
     expect(beta1.filter((n) => beta2.includes(n))).toEqual([]); // nenhum nome em comum
   });
 

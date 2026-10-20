@@ -196,8 +196,8 @@ export function verifyManifestDir(dir) {
 /**
  * Copia os instaladores reais do Tauri para `outDir` com nomes seguros (sem espaços), calcula o
  * SHA-256 dos arquivos JÁ COPIADOS (os que serão publicados) e grava o manifesto em LF.
- * `version`/`wixVersion` são a versão que precisa aparecer nos nomes (NSIS usa a versão completa,
- * MSI usa a versão numérica do WiX), impedindo anexar instaladores de outra versão.
+ * `version` é a versão completa que precisa aparecer nos nomes dos dois instaladores, impedindo
+ * anexar instaladores de outra versão (`wixVersion` é aceito por compatibilidade e não é usado).
  */
 export function prepareReleaseAssets({ bundleDir, outDir, version, wixVersion }) {
   if (fs.existsSync(outDir) && fs.readdirSync(outDir).length > 0) {
@@ -205,12 +205,14 @@ export function prepareReleaseAssets({ bundleDir, outDir, version, wixVersion })
   }
   const { msi, nsis } = findInstallers(bundleDir);
   const nsisMarker = `_${version}_`;
-  const msiMarker = `_${wixVersion ?? version}_`;
+  // O Tauri 2.11 nomeia NSIS e MSI com a versão completa (`0.1.0-beta.2`); a versão numérica do
+  // WiX (`wixVersion`) só vai nos metadados do MSI. Comprovado no build de CI da beta.2.
+  const msiMarker = `_${version}_`;
   if (!path.basename(nsis).includes(nsisMarker)) {
     throw new Error(`O instalador NSIS '${path.basename(nsis)}' não contém a versão esperada '${version}'.`);
   }
   if (!path.basename(msi).includes(msiMarker)) {
-    throw new Error(`O instalador MSI '${path.basename(msi)}' não contém a versão esperada '${wixVersion ?? version}'.`);
+    throw new Error(`O instalador MSI '${path.basename(msi)}' não contém a versão esperada '${version}'.`);
   }
   fs.mkdirSync(outDir, { recursive: true });
   const entries = [];

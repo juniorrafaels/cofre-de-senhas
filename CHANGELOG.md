@@ -6,7 +6,9 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). 
 
 ## [Não lançado]
 
-## [0.1.0-beta.2] - 2026-10-20
+## [0.1.0-beta.3] - 2026-10-20
+
+A tag `v0.1.0-beta.2` foi criada, mas o workflow falhou ao reunir os instaladores (o MSI do Tauri leva a versão completa no nome, não a numérica) e nenhuma release foi publicada; esta versão contém a correção.
 
 ### Adicionado
 - **Desbloqueio com duas senhas** (opcional, desligado por padrão): `KEK = HKDF(Argon2id(senha1) ||
