@@ -38,7 +38,7 @@ chrono = "0.4"
 sha2 = "0.10"
 sharks = { version = "0.5", features = ["zeroize_memory"] }
 hkdf = "0.12"
-rand_chacha = "0.3"
+rand_chacha = "0.10"
 
 # Hook nativo de lock/suspend (Fase 3 do hardening — ver src/native_lock.rs). Restrito ao alvo
 # Windows: não é puxado em builds para outras plataformas.
