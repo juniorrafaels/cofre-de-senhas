@@ -6,6 +6,7 @@ import { Input, Label } from "../ui/Input";
 import { vaultCommands } from "../../lib/tauri";
 import { useVaultStore } from "../../store/useVaultStore";
 import { useToastStore } from "../../store/useToastStore";
+import { SecondPasswordField, useDualUnlock } from "../security/SecondPasswordField";
 import { DEFAULT_LOCALE, useLocaleStore, useTranslation } from "../../i18n";
 import { translateBackendError } from "../../i18n/backendErrors";
 
@@ -23,6 +24,8 @@ export function DeleteVaultSection() {
   const confirmWord = t("deleteVault.confirmWord");
   const [step, setStep] = useState<Step>("idle");
   const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState("");
+  const dual = useDualUnlock();
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [confirmText, setConfirmText] = useState("");
@@ -33,6 +36,7 @@ export function DeleteVaultSection() {
   function resetAll() {
     setStep("idle");
     setPassword("");
+    setPassword2("");
     setPasswordError(null);
     setConfirmText("");
   }
@@ -42,7 +46,7 @@ export function DeleteVaultSection() {
     setVerifying(true);
     setPasswordError(null);
     try {
-      await vaultCommands.verifyMasterPassword(password);
+      await vaultCommands.verifyMasterPassword(password, dual ? password2 : undefined);
       setStep("confirm");
     } catch (err) {
       setPasswordError(translateBackendError(t, err));
@@ -54,7 +58,7 @@ export function DeleteVaultSection() {
   async function handleDelete() {
     setDeleting(true);
     try {
-      await vaultCommands.deleteVault(password);
+      await vaultCommands.deleteVault(password, dual ? password2 : undefined);
       resetAll();
       push(t("deleteVault.successToast"), "success");
       // Ao voltar para o fluxo de criação de um novo cofre, o idioma reinicia em português
@@ -95,12 +99,13 @@ export function DeleteVaultSection() {
               disabled={verifying}
             />
           </div>
+          <SecondPasswordField value={password2} onChange={setPassword2} disabled={verifying} />
           {passwordError && <p className="text-sm text-[var(--color-danger)]">{passwordError}</p>}
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="ghost" onClick={resetAll} disabled={verifying}>
               {t("common.cancel")}
             </Button>
-            <Button type="submit" variant="danger" disabled={!password || verifying}>
+            <Button type="submit" variant="danger" disabled={!password || (dual && !password2) || verifying}>
               {verifying ? t("common.verifying") : t("common.continue")}
             </Button>
           </div>

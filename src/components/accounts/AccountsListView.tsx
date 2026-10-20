@@ -2,6 +2,8 @@ import { Copy, ExternalLink, Key, Pencil, Star } from "lucide-react";
 import { type AccountWithRelations, type ListColumnKey } from "../../types";
 import { Avatar } from "../ui/Avatar";
 import { StatusBadge } from "../ui/StatusBadge";
+import { UpdatedBadge } from "./UpdatedBadge";
+import { formatLastLogin } from "../../lib/accountBadge";
 import { useCopy, useCopySecret } from "../../lib/useCopy";
 import { accountSecretCommands, openLoginUrl } from "../../lib/tauri";
 import { useToastStore } from "../../store/useToastStore";
@@ -42,6 +44,7 @@ function ColumnCell({
         <div className="flex items-center gap-1.5">
           <span className="font-medium text-[var(--color-text)]">{account.name}</span>
           {!!account.favorite && <Star size={12} fill="currentColor" className="text-amber-400" />}
+          <UpdatedBadge confirmedAt={account.update_confirmed_at} />
         </div>
       );
     case "platform":
@@ -58,6 +61,8 @@ function ColumnCell({
       return <span className="text-[var(--color-text-muted)]">{account.tags.map((t2) => t2.name).join(", ") || t("common.dash")}</span>;
     case "updated_at":
       return <span className="text-[var(--color-text-muted)]">{new Date(account.updated_at).toLocaleDateString(intlLocale)}</span>;
+    case "last_login":
+      return <span className="text-[var(--color-text-muted)]">{formatLastLogin(account.last_login_at, intlLocale) || t("common.dash")}</span>;
     case "two_factor":
       return <span className="text-[var(--color-text-muted)]">{account.two_factor_enabled ? t("accounts.list.yes") : t("accounts.list.no")}</span>;
     default:

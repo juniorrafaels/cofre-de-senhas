@@ -1,0 +1,257 @@
+# Release automatizada, disparada por uma tag de versão (v*).
+#
+#   (docs/RELEASE.md descreve o passo a passo, incluindo a preparação das versões)
+#   git tag v0.1.0-beta.2 && git push origin v0.1.0-beta.2
+#
+# - Tag vX.Y.Z-beta.N → PRE-RELEASE publicada (só depois de conferir os arquivos guardados).
+# - Tag vX.Y.Z (estável) → release criada como RASCUNHO; só vira pública quando o mantenedor
+#   revisar e clicar em "Publish release". Nada estável é publicado sozinho.
+#
+# O workflow recusa a tag se: o formato for inválido (só vX.Y.Z e vX.Y.Z-beta.N); a versão não
+# bater EXATAMENTE com package.json, tauri.conf.json e Cargo.toml (e, em beta, com o
+# bundle.windows.wix.version numérico do MSI); ou o commit da tag não estiver na branch main.
+# Publica os instaladores individualmente (nomes sem espaços) + SHA256SUMS.txt + attestation.
+# NÃO assina digitalmente os instaladores (não há certificado de assinatura de código).
+#
+# A proteção de tags v* (Settings → Rules → Rulesets) é configurada no GitHub, não aqui; as
+# checagens deste workflow reduzem o risco, mas não a substituem.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Validar tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Conferir formato da tag e versões (package.json, tauri.conf.json, Cargo.toml, MSI)
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/release-check-version.mjs "$TAG"
+
+      - name: Conferir que o commit da tag está na branch main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::O commit da tag ($GITHUB_SHA) não está na branch main."; exit 1
+          fi
+
+  audit:
+    name: Auditoria de dependências
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: npm audit (produção)
+        run: npm audit --omit=dev --audit-level=high
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit
+
+  build:
+    name: Testes e instaladores (Windows)
+    needs: [verify, audit]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # branch stable (sem tags de versão)
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      - name: Testes do backend (Rust)
+        working-directory: src-tauri
+        run: cargo test --lib --locked
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets
+
+      - name: Build Tauri (MSI + NSIS)
+        run: npx tauri build
+
+      # Usa os nomes REAIS gerados pelo Tauri, troca espaços por "-" (os mesmos nomes serão
+      # publicados, sem depender de normalização do GitHub), calcula o SHA-256 dos arquivos já
+      # copiados e grava o SHA256SUMS.txt em LF. Falha se faltar/sobrar instalador ou se a versão
+      # no nome não for a da tag. Testado em scripts/__tests__/release.test.mjs.
+      - name: Reunir instaladores, padronizar nomes e calcular SHA-256
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/release-assets.mjs --tag "$TAG" --bundle-dir src-tauri/target/release/bundle --out-dir release-assets
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Atestar e publicar release
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Única etapa com permissão de escrita. Os jobs que compilam rodam só com contents: read.
+    permissions:
+      contents: write      # criar a release e anexar os arquivos
+      id-token: write      # identidade OIDC para a attestation
+      attestations: write  # gravar a attestation
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Conferir hashes, nomes e formato do artefato baixado
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          if grep -q $'\r' SHA256SUMS.txt; then echo "::error::SHA256SUMS.txt contém CRLF."; exit 1; fi
+          sha256sum -c SHA256SUMS.txt
+          # nomes seguros e únicos; o diretório tem exatamente os arquivos do manifesto + o manifesto
+          if awk '{print $2}' SHA256SUMS.txt | grep -qvE '^[A-Za-z0-9._-]+$'; then echo "::error::Nome inseguro no manifesto."; exit 1; fi
+          diff <(awk '{print $2}' SHA256SUMS.txt | sort) <(ls -1 | grep -vx SHA256SUMS.txt | sort)
+          ls -l
+
+      # A tag pode ter sido apagada e recriada depois do disparo: o commit que a tag aponta agora
+      # precisa ser o mesmo que foi compilado e continuar dentro da main. (Complementa, não
+      # substitui, a proteção de tags v* do repositório.)
+      - name: Conferir que a tag ainda aponta para o commit compilado
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
+          if [ "$current" != "$EXPECTED_SHA" ]; then
+            echo "::error::A tag $TAG agora aponta para $current, mas o build foi feito em $EXPECTED_SHA."; exit 1
+          fi
+          status=$(gh api "repos/$REPO/compare/main...$EXPECTED_SHA" --jq .status)
+          case "$status" in
+            identical|behind) ;;
+            *) echo "::error::O commit $EXPECTED_SHA não está na main (compare: $status)."; exit 1 ;;
+          esac
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release-assets/*.msi
+            release-assets/*-setup.exe
+
+      # Sempre cria como RASCUNHO primeiro: assim dá para conferir os arquivos que o GitHub
+      # realmente guardou antes de qualquer pessoa poder baixá-los.
+      - name: Criar a release como rascunho
+        id: create
+        env:
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
+          if [ "$current" != "$EXPECTED_SHA" ]; then
+            echo "::error::A tag $TAG mudou de commit durante o workflow."; exit 1
+          fi
+          {
+            echo "Versão \`$TAG\` do Cofre de Contas para Windows 10/11 (64 bits)."
+            echo
+            echo "## Verifique antes de instalar"
+            echo
+            echo "SHA-256 dos arquivos (também em \`SHA256SUMS.txt\`, nesta release):"
+            echo
+            echo '```'
+            cat release-assets/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "- Windows (PowerShell): \`Get-FileHash .\\<arquivo> -Algorithm SHA256\` e compare com o valor acima."
+            echo "- Linux/macOS: baixe os arquivos e o \`SHA256SUMS.txt\` na mesma pasta e rode \`sha256sum -c SHA256SUMS.txt\`."
+            echo "- O hash confere a **integridade** do arquivo baixado; sozinho, **não prova quem o publicou**."
+            echo "- Os instaladores têm **attestation de proveniência** do GitHub (origem do build neste repositório):"
+            echo "  \`gh attestation verify <arquivo> --repo $REPO\`"
+            echo "- Os instaladores **não são assinados digitalmente**. O Windows SmartScreen pode exibir um aviso."
+            echo "- Software em evolução: faça backup e não use como único local de credenciais críticas."
+            echo "  Veja o \`SECURITY.md\` para as limitações conhecidas."
+          } > notes.md
+          flags=(--draft)
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" release-assets/* \
+            --repo "$REPO" --verify-tag --title "Cofre de Contas $TAG" --notes-file notes.md "${flags[@]}"
+
+      # Baixa de volta, pela API, os arquivos que o GitHub guardou na rascunho e compara com o que
+      # foi enviado e com o manifesto. É a evidência de que os nomes publicados são exatamente os
+      # nomes do SHA256SUMS.txt (nada é suposto sobre normalização de nomes).
+      - name: Conferir os arquivos guardados na rascunho
+        id: stored
+        run: |
+          set -euo pipefail
+          releases=$(gh api "repos/$REPO/releases?per_page=30")
+          release=$(jq -c --arg tag "$TAG" '[.[] | select(.tag_name == $tag and .draft == true)]' <<<"$releases")
+          if [ "$(jq length <<<"$release")" != "1" ]; then
+            echo "::error::Esperada exatamente 1 rascunho para $TAG; encontradas $(jq length <<<"$release")."; exit 1
+          fi
+          echo "release_id=$(jq '.[0].id' <<<"$release")" >> "$GITHUB_OUTPUT"
+          diff <(jq -r '.[0].assets[].name' <<<"$release" | sort) <(ls -1 release-assets | sort)
+          mkdir stored
+          jq -r '.[0].assets[] | "\(.id)\t\(.name)"' <<<"$release" | while IFS=$'\t' read -r id name; do
+            gh api -H "Accept: application/octet-stream" "repos/$REPO/releases/assets/$id" > "stored/$name"
+          done
+          (cd stored && sha256sum -c SHA256SUMS.txt)
+          for f in release-assets/*; do cmp "$f" "stored/$(basename "$f")"; done
+          echo "Arquivos guardados no GitHub idênticos aos enviados e ao manifesto."
+
+      - name: Publicar (somente beta/pré-lançamento)
+        if: needs.verify.outputs.prerelease == 'true'
+        env:
+          RELEASE_ID: ${{ steps.stored.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F draft=false -F prerelease=true -f make_latest=false --jq .html_url
+
+      - name: Estável fica como rascunho para revisão
+        if: needs.verify.outputs.prerelease != 'true'
+        run: echo "::notice::Release estável $TAG criada como RASCUNHO e conferida. Revise e publique manualmente em Releases."

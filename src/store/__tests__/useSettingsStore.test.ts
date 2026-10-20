@@ -78,3 +78,32 @@ describe("useSettingsStore — language preference (section 16 do pedido de i18n
     expect(useLocaleStore.getState().locale).toBe("es");
   });
 });
+
+describe("useSettingsStore — preferências de exibição de último login e selo \"Atualizada\"", () => {
+  beforeEach(() => {
+    dbState.settings = {};
+    vi.resetModules();
+  });
+
+  it("shows the badge by default and does not add the last-login column to existing layouts", async () => {
+    const { useSettingsStore } = await import("../useSettingsStore");
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().showUpdatedBadge).toBe(true);
+    expect(useSettingsStore.getState().listColumns).not.toContain("last_login");
+  });
+
+  it("persists the badge preference separately from the column list, and restores both after reopening", async () => {
+    const { useSettingsStore } = await import("../useSettingsStore");
+    await useSettingsStore.getState().setShowUpdatedBadge(false);
+    await useSettingsStore.getState().setListColumns(["name", "last_login"]);
+    expect(dbState.settings.show_updated_badge).toBe("false");
+    expect(dbState.settings.list_columns).toBe('["name","last_login"]');
+
+    await useSettingsStore.getState().load(); // "fecha e abre de novo"
+    expect(useSettingsStore.getState().showUpdatedBadge).toBe(false);
+    expect(useSettingsStore.getState().listColumns).toEqual(["name", "last_login"]);
+
+    await useSettingsStore.getState().setShowUpdatedBadge(true);
+    expect(useSettingsStore.getState().listColumns).toEqual(["name", "last_login"]); // independentes
+  });
+});

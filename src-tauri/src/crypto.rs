@@ -99,9 +99,6 @@ pub fn encrypt(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>, CryptoE
 /// Usada para reconstruir o "dealer" do Shamir Secret Sharing sob demanda (mesma DEK + mesmo
 /// contexto sempre gera a mesma seed, então cada share pode ser recalculada quando necessário
 /// sem precisar armazenar o polinômio ou reunir respostas antigas).
-// Só usada pelos testes desde que a criação de perguntas de segurança foi descontinuada (ver
-// `security_questions::add_security_question`); a recuperação em produção não precisa dela.
-#[cfg(test)]
 pub fn derive_deterministic_seed(dek: &[u8; KEY_LEN], context: &[u8]) -> [u8; 32] {
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, dek);
     let mut seed = [0u8; 32];
@@ -141,6 +138,104 @@ pub fn decrypt_from_base64(key: &[u8; KEY_LEN], ciphertext: &str) -> Result<Stri
     decrypt(key, &bytes)
         .map(|plain| String::from_utf8_lossy(&plain).to_string())
         .map_err(|_| "Falha ao descriptografar.".to_string())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Campos de metadados com formato versionado e AAD (`enc:v2:`)
+// ---------------------------------------------------------------------------------------------
+//
+// Diferente do formato legado de `encrypt_to_base64` (usado por senha, notas e 2FA: base64 puro,
+// sem AAD), os campos de metadados (`accounts.name/username/email/category/login_url/
+// website_url`, `account_history.detail`) gravam `enc:v2:` + base64(nonce || ciphertext+tag) e
+// autenticam um AAD que amarra o valor à sua tabela, coluna e linha. Copiar o ciphertext para
+// outra conta, outra coluna ou outra tabela faz o AEAD falhar — o valor nunca é "trocado em
+// silêncio". A autenticidade vem da tag Poly1305, não do prefixo (o prefixo só diz qual formato
+// tentar). As colunas legadas de segredo continuam no formato antigo: cada coluna tem um formato
+// fixo, então não há ambiguidade entre os dois.
+
+pub const FIELD_PREFIX_V2: &str = "enc:v2:";
+const FIELD_AAD_CONTEXT: &[u8] = b"cofre/field/v2";
+
+/// Motivo pelo qual um campo não pôde ser lido. Nunca carrega o valor.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum FieldError {
+    /// Prefixo `enc:vN:` com N desconhecido (cofre de uma versão mais nova do app).
+    UnknownVersion,
+    /// Falha de autenticação (adulterado, copiado de outro campo/linha, chave errada) ou base64/UTF-8 inválido.
+    Corrupt,
+}
+
+/// AAD sem ambiguidade: cada parte textual vem com prefixo de tamanho (u32 BE) e o id da linha
+/// entra como i64 BE de largura fixa — `("a","bc")` nunca colide com `("ab","c")`.
+pub fn field_aad(table: &str, column: &str, row_id: i64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(FIELD_AAD_CONTEXT.len() + table.len() + column.len() + 16);
+    for part in [FIELD_AAD_CONTEXT, table.as_bytes(), column.as_bytes()] {
+        aad.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        aad.extend_from_slice(part);
+    }
+    aad.extend_from_slice(&row_id.to_be_bytes());
+    aad
+}
+
+/// Como `encrypt`, mas autenticando `aad`. Nonce de 24 bytes aleatório do SO a cada chamada.
+pub fn encrypt_aad(key: &[u8; KEY_LEN], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let nonce_bytes = random_bytes(NONCE_LEN);
+    let nonce = XNonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, chacha20poly1305::aead::Payload { msg: plaintext, aad })
+        .map_err(|_| CryptoError::Internal)?;
+    let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Contraparte de `encrypt_aad`: falha se a chave, o AAD ou qualquer byte do ciphertext diferir.
+pub fn decrypt_aad(key: &[u8; KEY_LEN], data: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    if data.len() < NONCE_LEN {
+        return Err(CryptoError::DecryptionFailed);
+    }
+    let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .decrypt(XNonce::from_slice(nonce_bytes), chacha20poly1305::aead::Payload { msg: ciphertext, aad })
+        .map(Zeroizing::new)
+        .map_err(|_| CryptoError::DecryptionFailed)
+}
+
+/// `true` se o valor armazenado tem a forma `enc:v<dígitos>:` (qualquer versão).
+pub fn has_field_version_prefix(stored: &str) -> bool {
+    match stored.strip_prefix("enc:v") {
+        Some(rest) => {
+            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            digits > 0 && rest[digits..].starts_with(':')
+        }
+        None => false,
+    }
+}
+
+/// Cifra um campo de metadado no formato `enc:v2:`. `row_id` é o id estável da linha.
+pub fn encrypt_field(key: &[u8; KEY_LEN], table: &str, column: &str, row_id: i64, plaintext: &str) -> Result<String, String> {
+    encrypt_aad(key, plaintext.as_bytes(), &field_aad(table, column, row_id))
+        .map(|bytes| format!("{FIELD_PREFIX_V2}{}", B64.encode(bytes)))
+        .map_err(|_| "Falha ao criptografar.".to_string())
+}
+
+/// Lê um campo de metadado. Valor sem prefixo `enc:vN:` = texto puro LEGADO (cofre ainda não
+/// migrado), devolvido como está para permitir abrir cofres antigos. `enc:v2:` é verificado com
+/// o AAD de (tabela, coluna, linha). Outras versões ou falhas viram `FieldError` — nunca um
+/// valor vazio ou "quase certo".
+pub fn decrypt_field(key: &[u8; KEY_LEN], table: &str, column: &str, row_id: i64, stored: &str) -> Result<String, FieldError> {
+    if let Some(b64) = stored.strip_prefix(FIELD_PREFIX_V2) {
+        let bytes = B64.decode(b64).map_err(|_| FieldError::Corrupt)?;
+        let plain = decrypt_aad(key, &bytes, &field_aad(table, column, row_id)).map_err(|_| FieldError::Corrupt)?;
+        return String::from_utf8(plain.to_vec()).map_err(|_| FieldError::Corrupt);
+    }
+    if has_field_version_prefix(stored) {
+        return Err(FieldError::UnknownVersion);
+    }
+    Ok(stored.to_string())
 }
 
 // Alfabeto Crockford Base32 (32 símbolos = exatamente 5 bits/caractere, sem viés de módulo,
@@ -346,5 +441,54 @@ mod tests {
         tampered.push(replacement);
         let wrong_kek2 = derive_key(&tampered, &salt, &params).unwrap();
         assert!(decrypt(&wrong_kek2, &wrapped).is_err());
+    }
+
+    // ---- Campos `enc:v2:` com AAD ----
+
+    #[test]
+    fn field_round_trip_and_nonce_is_fresh_each_time() {
+        let key = [4u8; KEY_LEN];
+        let a = encrypt_field(&key, "accounts", "username", 7, "audit-user-7391").unwrap();
+        let b = encrypt_field(&key, "accounts", "username", 7, "audit-user-7391").unwrap();
+        assert!(a.starts_with(FIELD_PREFIX_V2));
+        assert_ne!(a, b, "nonce aleatório: duas cifragens do mesmo valor não podem coincidir");
+        assert!(!a.contains("audit-user-7391"));
+        assert_eq!(decrypt_field(&key, "accounts", "username", 7, &a), Ok("audit-user-7391".to_string()));
+        assert_eq!(decrypt_field(&key, "accounts", "username", 7, &b), Ok("audit-user-7391".to_string()));
+    }
+
+    #[test]
+    fn field_ciphertext_copied_to_another_row_column_or_table_fails_authentication() {
+        let key = [4u8; KEY_LEN];
+        let stored = encrypt_field(&key, "accounts", "username", 7, "valor-ficticio").unwrap();
+        assert_eq!(decrypt_field(&key, "accounts", "username", 8, &stored), Err(FieldError::Corrupt), "outra linha");
+        assert_eq!(decrypt_field(&key, "accounts", "email", 7, &stored), Err(FieldError::Corrupt), "outra coluna");
+        assert_eq!(decrypt_field(&key, "account_history", "username", 7, &stored), Err(FieldError::Corrupt), "outra tabela");
+        assert_eq!(decrypt_field(&[5u8; KEY_LEN], "accounts", "username", 7, &stored), Err(FieldError::Corrupt), "outra chave");
+    }
+
+    #[test]
+    fn field_aad_encoding_is_unambiguous() {
+        assert_ne!(field_aad("a", "bc", 1), field_aad("ab", "c", 1));
+        assert_ne!(field_aad("accounts", "name", 1), field_aad("accounts", "name", 256));
+        assert_ne!(field_aad("accounts", "name", 1), field_aad("accounts", "name", -1));
+    }
+
+    #[test]
+    fn field_tampering_unknown_version_and_legacy_plaintext() {
+        let key = [4u8; KEY_LEN];
+        let stored = encrypt_field(&key, "accounts", "name", 1, "x").unwrap();
+        let mut chars: Vec<char> = stored.chars().collect();
+        let last = chars.len() - 6;
+        chars[last] = if chars[last] == 'A' { 'B' } else { 'A' };
+        let tampered: String = chars.into_iter().collect();
+        assert_eq!(decrypt_field(&key, "accounts", "name", 1, &tampered), Err(FieldError::Corrupt));
+        assert_eq!(decrypt_field(&key, "accounts", "name", 1, "enc:v2:%%%nao-base64"), Err(FieldError::Corrupt));
+        assert_eq!(decrypt_field(&key, "accounts", "name", 1, "enc:v3:AAAA"), Err(FieldError::UnknownVersion));
+        assert_eq!(decrypt_field(&key, "accounts", "name", 1, "enc:v99:"), Err(FieldError::UnknownVersion));
+        // Sem prefixo de versão = legado em texto puro (inclusive texto parecido, mas não igual).
+        assert_eq!(decrypt_field(&key, "accounts", "name", 1, "texto legado"), Ok("texto legado".to_string()));
+        assert_eq!(decrypt_field(&key, "accounts", "name", 1, "enc:vX:abc"), Ok("enc:vX:abc".to_string()));
+        assert_eq!(decrypt_field(&key, "accounts", "name", 1, ""), Ok(String::new()));
     }
 }

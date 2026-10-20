@@ -121,6 +121,8 @@ export interface SaveAccountInput {
   two_factor_email: string | null;
   two_factor_app: string | null;
   two_factor_notes: string | null;
+  /** Data do último login informada pelo usuário (`YYYY-MM-DD`), ou null. */
+  last_login_at: string | null;
   preserveFields: string[];
 }
 
@@ -156,6 +158,13 @@ export async function unarchiveAccount(id: number): Promise<void> {
 
 export async function toggleFavorite(id: number, favorite: boolean): Promise<void> {
   await invoke<void>("toggle_favorite", { id, favorite });
+}
+
+// Confirmação MANUAL de "conta atualizada" (renova o selo por 90 dias). Única operação que grava
+// essa data: editar/abrir/visualizar a conta nunca passa por aqui, e ela não registra um login.
+// Retorna o instante UTC gravado.
+export async function markAccountUpdated(id: number): Promise<string> {
+  return invoke<string>("mark_account_updated", { id });
 }
 
 // ---------- Settings ----------

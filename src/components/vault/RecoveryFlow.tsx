@@ -3,7 +3,8 @@ import { KeyRound, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Input, Label } from "../ui/Input";
-import { securityQuestionCommands, recoveryKeyCommands } from "../../lib/tauri";
+import { securityQuestionCommands, recoveryKeyCommands, recoveryPasswordCommands } from "../../lib/tauri";
+import { useSecurityStore } from "../../store/useSecurityStore";
 import { useVaultStore } from "../../store/useVaultStore";
 import { useToastStore } from "../../store/useToastStore";
 import type { RecoveryQuestion } from "../../types";
@@ -20,6 +21,7 @@ type Step =
   | "unavailable"
   | "choose-method"
   | "recovery-key"
+  | "recovery-password"
   | "answering"
   | "submitting"
   | "reset-password"
@@ -31,6 +33,12 @@ export function RecoveryFlow({ open, onClose }: Props) {
   const [unavailableReason, setUnavailableReason] = useState("");
   const [questionsAvailable, setQuestionsAvailable] = useState(false);
   const [recoveryKeyAvailable, setRecoveryKeyAvailable] = useState(false);
+  const [recoveryPasswordAvailable, setRecoveryPasswordAvailable] = useState(false);
+  const [recoveryPasswordInput, setRecoveryPasswordInput] = useState("");
+  const [recoveryPasswordError, setRecoveryPasswordError] = useState<string | null>(null);
+  const [recoveryPasswordSubmitting, setRecoveryPasswordSubmitting] = useState(false);
+  const gate = useSecurityStore((s) => s.gate);
+  const refreshGate = useSecurityStore((s) => s.refresh);
   const [questions, setQuestions] = useState<RecoveryQuestion[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentAnswer, setCurrentAnswer] = useState("");
@@ -59,13 +67,21 @@ export function RecoveryFlow({ open, onClose }: Props) {
   async function startFlow() {
     setStep("loading");
     setFailMessage(null);
-    const [summary, keyStatus] = await Promise.all([securityQuestionCommands.summary(), recoveryKeyCommands.status()]);
+    const [summary, keyStatus, passwordStatus] = await Promise.all([
+      securityQuestionCommands.summary(),
+      recoveryKeyCommands.status(),
+      recoveryPasswordCommands.status().catch(() => ({ enabled: false, created_at: null })),
+    ]);
     const hasQuestions = summary.count >= summary.min_required_for_recovery;
     const hasRecoveryKey = keyStatus.enabled;
+    const hasRecoveryPassword = passwordStatus.enabled;
     setQuestionsAvailable(hasQuestions);
     setRecoveryKeyAvailable(hasRecoveryKey);
+    setRecoveryPasswordAvailable(hasRecoveryPassword);
+    setRecoveryPasswordInput("");
+    setRecoveryPasswordError(null);
 
-    if (!hasQuestions && !hasRecoveryKey) {
+    if (!hasQuestions && !hasRecoveryKey && !hasRecoveryPassword) {
       setUnavailableReason(
         summary.count > 0
           ? t("recovery.unavailableWithCount", { min: summary.min_required_for_recovery, count: summary.count })
@@ -75,10 +91,13 @@ export function RecoveryFlow({ open, onClose }: Props) {
       return;
     }
 
-    if (hasRecoveryKey && hasQuestions) {
+    const methodCount = [hasRecoveryKey, hasQuestions, hasRecoveryPassword].filter(Boolean).length;
+    if (methodCount > 1) {
       setStep("choose-method");
     } else if (hasRecoveryKey) {
       setStep("recovery-key");
+    } else if (hasRecoveryPassword) {
+      setStep("recovery-password");
     } else {
       await startQuestionsFlow();
     }
@@ -101,6 +120,24 @@ export function RecoveryFlow({ open, onClose }: Props) {
       setRecoveryKeyError(translateBackendError(t, err));
     } finally {
       setRecoveryKeySubmitting(false);
+    }
+  }
+
+  async function handleRecoveryPasswordSubmit(e: FormEvent) {
+    e.preventDefault();
+    setRecoveryPasswordSubmitting(true);
+    setRecoveryPasswordError(null);
+    try {
+      await recoveryPasswordCommands.unlock(recoveryPasswordInput);
+      setRecoveryPasswordInput("");
+      await refreshGate();
+      setStep("reset-password");
+    } catch (err) {
+      setRecoveryPasswordError(translateBackendError(t, err));
+      // Traz do backend o bloqueio/estado atual (ex.: instância já aberta, bloqueio progressivo).
+      await refreshGate();
+    } finally {
+      setRecoveryPasswordSubmitting(false);
     }
   }
 
@@ -185,12 +222,21 @@ export function RecoveryFlow({ open, onClose }: Props) {
         <div className="space-y-3">
           <p className="text-sm text-[var(--color-text-muted)]">{t("recovery.chooseMethodPrompt")}</p>
           <div className="space-y-2">
-            <Button variant="primary" className="w-full justify-start" onClick={() => setStep("recovery-key")}>
-              <KeyRound size={14} /> {t("recovery.useRecoveryKey")}
-            </Button>
-            <Button variant="secondary" className="w-full justify-start" onClick={() => startQuestionsFlow()}>
-              <ShieldCheck size={14} /> {t("recovery.useSecurityQuestions")}
-            </Button>
+            {recoveryKeyAvailable && (
+              <Button variant="primary" className="w-full justify-start" onClick={() => setStep("recovery-key")}>
+                <KeyRound size={14} /> {t("recovery.useRecoveryKey")}
+              </Button>
+            )}
+            {questionsAvailable && (
+              <Button variant="secondary" className="w-full justify-start" onClick={() => startQuestionsFlow()}>
+                <ShieldCheck size={14} /> {t("recovery.useSecurityQuestions")}
+              </Button>
+            )}
+            {recoveryPasswordAvailable && (
+              <Button variant="secondary" className="w-full justify-start" onClick={() => setStep("recovery-password")}>
+                <KeyRound size={14} /> {t("security.recoveryPassword.flow.option")}
+              </Button>
+            )}
           </div>
           <div className="flex justify-end pt-2">
             <Button variant="ghost" onClick={onClose}>
@@ -198,6 +244,38 @@ export function RecoveryFlow({ open, onClose }: Props) {
             </Button>
           </div>
         </div>
+      )}
+
+      {step === "recovery-password" && (
+        <form onSubmit={handleRecoveryPasswordSubmit} className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">{t("security.recoveryPassword.flow.prompt")}</p>
+          {recoveryPasswordError && (
+            <p role="alert" data-testid="recovery-password-error" className="text-sm text-[var(--color-danger)]">
+              {recoveryPasswordError}
+            </p>
+          )}
+          <div>
+            <Label>{t("security.recoveryPassword.flow.label")}</Label>
+            <Input
+              type="password"
+              value={recoveryPasswordInput}
+              onChange={(e) => setRecoveryPasswordInput(e.target.value)}
+              autoFocus
+              disabled={recoveryPasswordSubmitting}
+              autoComplete="off"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            {(recoveryKeyAvailable || questionsAvailable) && (
+              <Button type="button" variant="ghost" onClick={() => setStep("choose-method")}>
+                {t("recovery.chooseAnotherMethod")}
+              </Button>
+            )}
+            <Button type="submit" variant="primary" disabled={!recoveryPasswordInput || recoveryPasswordSubmitting}>
+              {recoveryPasswordSubmitting ? t("common.verifying") : t("common.confirm")}
+            </Button>
+          </div>
+        </form>
       )}
 
       {step === "recovery-key" && (
@@ -261,6 +339,9 @@ export function RecoveryFlow({ open, onClose }: Props) {
             <ShieldCheck size={18} className="mt-0.5 shrink-0" />
             <p className="text-sm font-medium">{t("recovery.identityConfirmed")}</p>
           </div>
+          {gate?.dual && (
+            <p className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">{t("security.recoveryPassword.flow.resetNote")}</p>
+          )}
           <div>
             <Label>{t("recovery.newPasswordLabel")}</Label>
             <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} autoFocus />

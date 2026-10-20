@@ -31,6 +31,7 @@ import {
   deleteAccount,
   deleteProject,
   logHistory,
+  markAccountUpdated,
   permanentlyDeleteAccount,
   restoreAccount,
   toggleFavorite,
@@ -152,6 +153,7 @@ function App() {
       two_factor_email: values.two_factor_email,
       two_factor_app: values.two_factor_app,
       two_factor_notes: values.two_factor_notes,
+      last_login_at: values.last_login_at.trim() || null,
       preserveFields,
     };
 
@@ -532,6 +534,11 @@ function App() {
         }}
         onDelete={() => setPendingDelete(detailAccount)}
         onArchiveToggle={() => detailAccount && handleArchiveToggle(detailAccount)}
+        onMarkUpdated={async (account) => {
+          const stamp = await markAccountUpdated(account.id);
+          await library.refresh();
+          return stamp;
+        }}
       />
 
       <ConfirmDialog

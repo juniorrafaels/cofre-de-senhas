@@ -3900,7 +3900,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "0.1.0"
+version = "0.1.0-beta.2"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3922,6 +3922,7 @@ dependencies = [
  "tauri-plugin-opener",
  "thiserror 1.0.69",
  "tokio",
+ "url",
  "windows",
  "zeroize",
 ]

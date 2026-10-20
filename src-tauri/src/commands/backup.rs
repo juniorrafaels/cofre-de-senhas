@@ -267,14 +267,16 @@ pub fn import_backup(
     in_path: String,
     backup_password: String,
     current_master_password: Option<String>,
+    current_master_password2: Option<String>,
 ) -> Result<(), String> {
     let backup_password = Zeroizing::new(backup_password);
     let current_master_password = current_master_password.map(Zeroizing::new);
+    let current_master_password2 = crate::commands::vault::opt_secret(current_master_password2);
 
     let mut conn = db::open(&app)?;
     db::init_schema(&conn)?;
     let bytes = std::fs::read(&in_path).map_err(|_| "Não foi possível ler o arquivo de backup.".to_string())?;
-    import_backup_core(&mut conn, &bytes, &backup_password, current_master_password.as_ref())?;
+    import_backup_with(&mut conn, &bytes, &backup_password, current_master_password.as_ref(), current_master_password2.as_ref())?;
 
     state.clear();
     Ok(())
@@ -284,11 +286,22 @@ pub fn import_backup(
 /// Ordem: (1) reautentica a senha mestra do cofre ATUAL, se houver cofre; (2) decifra e valida o
 /// arquivo por completo; (3) só então apaga+restaura, numa única transação — qualquer erro no
 /// meio do caminho faz rollback e o banco original fica intacto.
+#[cfg(test)]
 fn import_backup_core(
     conn: &mut Connection,
     bytes: &[u8],
     backup_password: &Zeroizing<String>,
     current_master_password: Option<&Zeroizing<String>>,
+) -> Result<(), String> {
+    import_backup_with(conn, bytes, backup_password, current_master_password, None)
+}
+
+fn import_backup_with(
+    conn: &mut Connection,
+    bytes: &[u8],
+    backup_password: &Zeroizing<String>,
+    current_master_password: Option<&Zeroizing<String>>,
+    current_master_password2: Option<&Zeroizing<String>>,
 ) -> Result<(), String> {
     let vault_exists: bool = conn
         .query_row("SELECT COUNT(*) FROM vault_meta WHERE id = 1", [], |row| row.get::<_, i64>(0))
@@ -298,7 +311,7 @@ fn import_backup_core(
         let password = current_master_password
             .filter(|p| !p.is_empty())
             .ok_or_else(|| IMPORT_REQUIRES_MASTER_PASSWORD.to_string())?;
-        crate::commands::vault::verify_current_password(conn, password)?;
+        crate::commands::vault::verify_credentials(conn, password, current_master_password2)?;
     }
 
     let payload = decode_backup_file(bytes, backup_password)?;
@@ -316,9 +329,9 @@ fn import_backup_core(
 fn validate_payload(payload: &BackupPayload) -> Result<(), String> {
     let invalid = || "Arquivo de backup inválido.".to_string();
     let meta = payload.vault_meta.as_object().ok_or_else(invalid)?;
-    for key in ["kdf_params", "recovery_key_kdf_params"] {
+    for key in ["kdf_params", "recovery_key_kdf_params", "unlock2_kdf_params", "recovery_pw_kdf_params"] {
         match meta.get(key) {
-            None | Some(Value::Null) if key == "recovery_key_kdf_params" => {}
+            None | Some(Value::Null) if key != "kdf_params" => {}
             Some(Value::String(json)) => {
                 let params: KdfParams = serde_json::from_str(json).map_err(|_| invalid())?;
                 if !params.is_within_bounds() {
@@ -342,6 +355,10 @@ fn allowed_columns(table: &str) -> &'static [&'static str] {
             "id", "kdf_salt", "kdf_params", "wrapped_dek", "dek_check", "created_at",
             "recovery_key_salt", "recovery_key_kdf_params", "recovery_key_wrapped_dek",
             "recovery_key_check", "recovery_key_created_at",
+            // Desbloqueio com duas senhas e segunda senha de recuperação (migração v1). Backups
+            // antigos não trazem estas colunas (ficam NULL = comportamento legado).
+            "unlock_policy", "unlock2_salt", "unlock2_kdf_params",
+            "recovery_pw_salt", "recovery_pw_kdf_params", "recovery_pw_wrapped_dek", "recovery_pw_created_at",
         ],
         "platforms" => &[
             "id", "name", "icon", "login_url", "website_url", "is_custom", "created_at", "logo_image_id",
@@ -359,6 +376,7 @@ fn allowed_columns(table: &str) -> &'static [&'static str] {
             "login_url", "website_url", "notes", "favorite", "created_at", "updated_at",
             "avatar_image_id", "status", "deleted_at", "two_factor_enabled", "two_factor_method",
             "two_factor_phone", "two_factor_email", "two_factor_app", "two_factor_notes",
+            "last_login_at", "update_confirmed_at",
         ],
         "tags" => &["id", "name"],
         "account_tags" => &["account_id", "tag_id"],
@@ -396,6 +414,9 @@ fn is_blob_column(table: &str, col: &str) -> bool {
             | ("vault_meta", "recovery_key_salt")
             | ("vault_meta", "recovery_key_wrapped_dek")
             | ("vault_meta", "recovery_key_check")
+            | ("vault_meta", "unlock2_salt")
+            | ("vault_meta", "recovery_pw_salt")
+            | ("vault_meta", "recovery_pw_wrapped_dek")
             | ("security_questions", "answer_salt")
             | ("security_questions", "wrapped_share")
     )
@@ -447,6 +468,28 @@ fn insert_rows(conn: &Connection, table: &str, rows: &[Value]) -> Result<(), Str
         conn.execute(&sql, param_refs.as_slice()).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Só para testes de outros módulos: exporta `source` para um `.vaultbackup` em memória e o
+/// restaura num banco novo (mesmo caminho de `export_backup`/`import_backup`, KDF reduzido).
+#[cfg(test)]
+pub(crate) fn clone_via_backup_for_test(source: &Connection, backup_password: &str) -> Connection {
+    let payload = build_backup_payload(source).unwrap();
+    let params = KdfParams { memory_kib: 8 * 1024, iterations: 1, parallelism: 1 };
+    let file = encode_backup_file_with_params(&payload, backup_password, &params).unwrap();
+    let decoded = decode_backup_file(&file, backup_password).unwrap();
+    let target = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&target).unwrap();
+    restore_backup_payload(&target, &decoded).unwrap();
+    target
+}
+
+/// Só para testes de outros módulos: os bytes de um `.vaultbackup` gerado a partir de `source`.
+#[cfg(test)]
+pub(crate) fn backup_bytes_for_test(source: &Connection, backup_password: &str) -> Vec<u8> {
+    let payload = build_backup_payload(source).unwrap();
+    let params = KdfParams { memory_kib: 8 * 1024, iterations: 1, parallelism: 1 };
+    encode_backup_file_with_params(&payload, backup_password, &params).unwrap()
 }
 
 #[cfg(test)]
@@ -945,5 +988,163 @@ mod tests {
         assert!(decode_backup_file(&forged_file(u32::MAX, ok_params), "x").is_err());
         let huge_params = vec![b' '; MAX_HEADER_PARAMS_LEN + 1];
         assert!(decode_backup_file(&forged_file(16, &huge_params), "x").is_err());
+    }
+}
+
+#[cfg(test)]
+mod credential_backup_tests {
+    use super::*;
+    use crate::auth::tests::{fast_params, legacy_vault};
+    use crate::lockout::{self, SystemClock};
+
+    const DEK: [u8; 32] = [55u8; 32];
+
+    fn pw(s: &str) -> Zeroizing<String> {
+        Zeroizing::new(s.to_string())
+    }
+
+    fn fast_kdf() -> KdfParams {
+        fast_params()
+    }
+
+    fn encode(payload: &BackupPayload) -> Vec<u8> {
+        encode_backup_file_with_params(payload, "senha-do-backup", &fast_kdf()).unwrap()
+    }
+
+    fn fresh_target() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn backup_of_a_vault_with_two_passwords_and_second_recovery_password_round_trips() {
+        let source = legacy_vault("senha-um-aaaa", DEK);
+        crate::auth::enable_dual(&source, "senha-um-aaaa", "senha-dois-bbbb", &fast_kdf(), &fast_kdf(), &SystemClock).unwrap();
+        crate::commands::recovery_password::set_recovery_password_core(
+            &source,
+            &pw("senha-um-aaaa"),
+            Some(&pw("senha-dois-bbbb")),
+            &pw("recuperacao-abc-1"),
+            &fast_kdf(),
+            &SystemClock,
+        )
+        .unwrap();
+
+        let target = clone_via_backup_for_test(&source, "senha-do-backup");
+        assert_eq!(crate::auth::read_policy(&target), Ok(crate::auth::UnlockPolicy::Dual));
+        assert_eq!(crate::auth::unwrap_dek(&target, "senha-um-aaaa", None), Err(crate::auth::AuthError::SecondPasswordRequired));
+        assert_eq!(crate::auth::unwrap_dek(&target, "senha-um-aaaa", Some("senha-dois-bbbb")), Ok(DEK));
+        assert_eq!(
+            crate::commands::recovery_password::unlock_with_recovery_password_core(&target, &pw("recuperacao-abc-1"), &SystemClock),
+            Ok(DEK)
+        );
+    }
+
+    #[test]
+    fn old_backup_without_the_new_columns_restores_as_a_single_password_vault() {
+        let source = legacy_vault("senha-um-aaaa", DEK);
+        source.execute("INSERT INTO accounts (name, created_at, updated_at) VALUES ('conta', 'then', 'then')", []).unwrap();
+        let mut payload = build_backup_payload(&source).unwrap();
+        // Simula um arquivo gerado por uma versão anterior: sem nenhuma coluna da migração v1.
+        let meta = payload.vault_meta.as_object_mut().unwrap();
+        for key in [
+            "unlock_policy", "unlock2_salt", "unlock2_kdf_params", "recovery_pw_salt", "recovery_pw_kdf_params",
+            "recovery_pw_wrapped_dek", "recovery_pw_created_at",
+        ] {
+            assert!(meta.remove(key).is_some(), "o backup atual traz {key}");
+        }
+        for account in &mut payload.accounts {
+            let a = account.as_object_mut().unwrap();
+            a.remove("last_login_at");
+            a.remove("update_confirmed_at");
+        }
+
+        let target = fresh_target();
+        let mut conn = target;
+        import_backup_with(&mut conn, &encode(&payload), &pw("senha-do-backup"), None, None).unwrap();
+
+        assert_eq!(crate::auth::read_policy(&conn), Ok(crate::auth::UnlockPolicy::Single));
+        assert_eq!(crate::auth::unwrap_dek(&conn, "senha-um-aaaa", None), Ok(DEK));
+        let status = crate::commands::recovery_password::status_core(&conn).unwrap();
+        assert!(!status.enabled);
+        let (name, last_login): (String, Option<String>) =
+            conn.query_row("SELECT name, last_login_at FROM accounts", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((name.as_str(), last_login), ("conta", None));
+    }
+
+    #[test]
+    fn backups_never_carry_the_lockout_state_and_restoring_never_resets_it() {
+        let source = legacy_vault("senha-um-aaaa", DEK);
+        lockout::set_enabled(&source, true).unwrap();
+        let payload = build_backup_payload(&source).unwrap();
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(!json.contains("auth_throttle") && !json.contains("locked_until_ms"));
+
+        // Cofre de destino com bloqueio ativo e falhas acumuladas: restaurar um backup (mesmo antigo)
+        // não pode zerar o contador nem desligar a política.
+        let target = legacy_vault("senha-um-aaaa", DEK);
+        lockout::set_enabled(&target, true).unwrap();
+        let clock = crate::auth::tests::TestClock(std::cell::Cell::new(1_000));
+        let _ = crate::auth::authenticate(&target, "errada-123456", None, &clock);
+        let before = lockout::status(&target, lockout::SCOPE_UNLOCK, &clock).unwrap();
+        assert_eq!(before.failed_count, 1);
+
+        // A restauração em si (sem a reautenticação, que legitimamente limparia a sequência).
+        restore_backup_payload(&target, &decode_backup_file(&encode(&payload), "senha-do-backup").unwrap()).unwrap();
+        let after = lockout::status(&target, lockout::SCOPE_UNLOCK, &clock).unwrap();
+        assert!(after.enabled, "a política continua ligada depois da restauração");
+        assert_eq!(after.failed_count, 1, "as falhas não foram zeradas pela restauração");
+    }
+
+    #[test]
+    fn restoring_a_backup_taken_before_a_credential_change_brings_back_those_credentials_with_the_same_dek() {
+        let source = legacy_vault("senha-um-aaaa", DEK);
+        let secret = crate::crypto::encrypt_to_base64(&DEK, "SEGREDO_FICTICIO_BACKUP").unwrap();
+        let old_backup = encode(&build_backup_payload(&source).unwrap());
+
+        crate::auth::enable_dual(&source, "senha-um-aaaa", "senha-dois-bbbb", &fast_kdf(), &fast_kdf(), &SystemClock).unwrap();
+        let new_backup = encode(&build_backup_payload(&source).unwrap());
+
+        let mut conn = source;
+        // Backup NOVO: as duas senhas continuam sendo exigidas (para reautenticar o cofre atual).
+        assert_eq!(
+            import_backup_with(&mut conn, &new_backup, &pw("senha-do-backup"), Some(&pw("senha-um-aaaa")), None),
+            Err("E_SECOND_PASSWORD_REQUIRED".to_string())
+        );
+        import_backup_with(&mut conn, &new_backup, &pw("senha-do-backup"), Some(&pw("senha-um-aaaa")), Some(&pw("senha-dois-bbbb"))).unwrap();
+        assert_eq!(crate::auth::unwrap_dek(&conn, "senha-um-aaaa", Some("senha-dois-bbbb")), Ok(DEK));
+
+        // Backup ANTIGO (anterior à política de duas senhas): restaura o desbloqueio de uma senha.
+        import_backup_with(&mut conn, &old_backup, &pw("senha-do-backup"), Some(&pw("senha-um-aaaa")), Some(&pw("senha-dois-bbbb"))).unwrap();
+        assert_eq!(crate::auth::read_policy(&conn), Ok(crate::auth::UnlockPolicy::Single));
+        let dek = crate::auth::unwrap_dek(&conn, "senha-um-aaaa", None).unwrap();
+        assert_eq!(crate::crypto::decrypt_from_base64(&dek, &secret).unwrap(), "SEGREDO_FICTICIO_BACKUP");
+    }
+
+    #[test]
+    fn a_failed_restore_keeps_the_current_vault_untouched() {
+        let mut conn = legacy_vault("senha-um-aaaa", DEK);
+        let before: Vec<u8> = conn.query_row("SELECT wrapped_dek FROM vault_meta", [], |r| r.get(0)).unwrap();
+        // Senha de backup errada: nada é alterado.
+        let backup = encode(&build_backup_payload(&conn).unwrap());
+        assert!(import_backup_with(&mut conn, &backup, &pw("senha-errada-123"), Some(&pw("senha-um-aaaa")), None).is_err());
+        // Senha mestra atual errada: nada é alterado.
+        assert!(import_backup_with(&mut conn, &backup, &pw("senha-do-backup"), Some(&pw("errada-123456")), None).is_err());
+        let after: Vec<u8> = conn.query_row("SELECT wrapped_dek FROM vault_meta", [], |r| r.get(0)).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn backup_with_out_of_bounds_kdf_params_for_the_new_envelopes_is_rejected() {
+        let source = legacy_vault("senha-um-aaaa", DEK);
+        let mut payload = build_backup_payload(&source).unwrap();
+        let evil = r#"{"memory_kib":4294967295,"iterations":1,"parallelism":1}"#;
+        for key in ["unlock2_kdf_params", "recovery_pw_kdf_params"] {
+            payload.vault_meta[key] = Value::from(evil);
+            assert!(validate_payload(&payload).is_err(), "{key}");
+            payload.vault_meta[key] = Value::Null;
+        }
+        assert!(validate_payload(&payload).is_ok());
     }
 }

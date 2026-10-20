@@ -2,6 +2,7 @@ import { Copy, ExternalLink, Key, Pencil, Star } from "lucide-react";
 import type { AccountWithRelations } from "../../types";
 import { Avatar } from "../ui/Avatar";
 import { StatusBadge } from "../ui/StatusBadge";
+import { UpdatedBadge } from "./UpdatedBadge";
 import { useCopy, useCopySecret } from "../../lib/useCopy";
 import { accountSecretCommands, openLoginUrl } from "../../lib/tauri";
 import { useToastStore } from "../../store/useToastStore";
@@ -60,6 +61,7 @@ export function AccountCard({ account, onOpenDetail, onEdit, onToggleFavorite }:
             <div className="flex items-center gap-1.5">
               <p className="truncate text-sm font-semibold text-[var(--color-text)]">{account.name}</p>
               <StatusBadge status={account.status} />
+              <UpdatedBadge confirmedAt={account.update_confirmed_at} />
             </div>
             <p className="truncate text-xs text-[var(--color-text-muted)]">{account.username || account.email || t("common.dash")}</p>
           </div>

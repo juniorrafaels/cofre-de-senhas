@@ -13,6 +13,9 @@ import { useToastStore } from "../../store/useToastStore";
 import { tryFetch } from "../../lib/secretFields";
 import { useTranslation } from "../../i18n";
 import { accountStatusLabel, twoFactorMethodLabel } from "../../i18n/enumLabels";
+import { UpdatedBadge } from "./UpdatedBadge";
+import { formatLastLogin, getUpdateBadge } from "../../lib/accountBadge";
+import { translateBackendError } from "../../i18n/backendErrors";
 
 interface Props {
   account: AccountWithRelations | null;
@@ -20,6 +23,11 @@ interface Props {
   onEdit: () => void;
   onDelete: () => void;
   onArchiveToggle: () => void;
+  /**
+   * Confirmação MANUAL de "conta atualizada" (único caminho que renova o selo de 90 dias).
+   * Devolve o instante UTC gravado.
+   */
+  onMarkUpdated: (account: AccountWithRelations) => Promise<string>;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -47,8 +55,11 @@ function computeHealth(t: (key: string) => string, account: AccountWithRelations
 
 const EMPTY_TWO_FACTOR = { phone: "", email: "", app: "", notes: "" };
 
-export function AccountDetailModal({ account, onClose, onEdit, onDelete, onArchiveToggle }: Props) {
-  const { t } = useTranslation();
+export function AccountDetailModal({ account, onClose, onEdit, onDelete, onArchiveToggle, onMarkUpdated }: Props) {
+  const { t, intlLocale } = useTranslation();
+  // Confirmação recém-gravada: vale até a lista ser recarregada e trazer o mesmo valor.
+  const [confirmedOverride, setConfirmedOverride] = useState<{ id: number; value: string } | null>(null);
+  const [marking, setMarking] = useState(false);
   const [tab, setTab] = useState<"details" | "properties" | "history">("details");
   const [twoFactor, setTwoFactor] = useState(EMPTY_TWO_FACTOR);
   const [notes, setNotes] = useState("");
@@ -123,6 +134,23 @@ export function AccountDetailModal({ account, onClose, onEdit, onDelete, onArchi
 
   const decryptionFailedMessage = t("accounts.detail.decryptionFailed");
 
+  const confirmedAt = confirmedOverride?.id === account.id ? confirmedOverride.value : account.update_confirmed_at;
+  const badgeState = getUpdateBadge(confirmedAt);
+
+  async function handleMarkUpdated() {
+    if (!account || marking) return;
+    setMarking(true);
+    try {
+      const stamp = await onMarkUpdated(account);
+      setConfirmedOverride({ id: account.id, value: stamp });
+      push(t("accounts.updateBadge.markedToast"), "success");
+    } catch (err) {
+      push(t("accounts.updateBadge.markFailedToast", { error: translateBackendError(t, err) }), "error");
+    } finally {
+      setMarking(false);
+    }
+  }
+
   return (
     <Modal open={!!account} onClose={onClose} title={account.platform?.name ?? t("accounts.detail.fallbackTitle")} width="md">
       <div className="mb-4 flex items-center gap-3">
@@ -178,6 +206,30 @@ export function AccountDetailModal({ account, onClose, onEdit, onDelete, onArchi
           </div>
 
           {loginUrl && <Field label={t("accounts.detail.loginUrlLabel")} value={loginUrl} mono />}
+
+          {/* Último login: dado informado pelo usuário; distinto de cadastro, edição e confirmação. */}
+          <Field label={t("accounts.lastLogin.label")} value={formatLastLogin(account.last_login_at, intlLocale) || t("accounts.lastLogin.none")} />
+
+          <div className="space-y-1.5 rounded-lg border border-[var(--color-border)] p-2.5" data-testid="update-confirmation">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-[var(--color-text-muted)]">{t("accounts.updateBadge.lastConfirmedLabel")}</p>
+              <UpdatedBadge confirmedAt={confirmedAt} />
+            </div>
+            <p className="text-sm text-[var(--color-text)]" data-testid="update-confirmation-status">
+              {badgeState.status === "valid"
+                ? t("accounts.updateBadge.expiresOn", { date: badgeState.expiresAt.toLocaleDateString(intlLocale), days: badgeState.daysLeft })
+                : badgeState.status === "expired"
+                  ? t("accounts.updateBadge.expiredTooltip", {
+                      date: badgeState.confirmedAt.toLocaleDateString(intlLocale),
+                      expires: badgeState.expiredAt.toLocaleDateString(intlLocale),
+                    })
+                  : t("accounts.updateBadge.neverConfirmed")}
+            </p>
+            <Button type="button" variant="secondary" size="sm" onClick={handleMarkUpdated} disabled={marking}>
+              <CheckCircle2 size={14} /> {t("accounts.updateBadge.markButton")}
+            </Button>
+            <p className="text-xs text-[var(--color-text-muted)]">{t("accounts.updateBadge.markHint")}</p>
+          </div>
 
           {!!account.two_factor_enabled && (
             <div className="rounded-lg border border-[var(--color-border)] p-2.5">

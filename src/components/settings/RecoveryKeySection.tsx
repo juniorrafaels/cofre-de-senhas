@@ -7,6 +7,7 @@ import { RecoveryKitDialog } from "./RecoveryKitDialog";
 import { clipboardCommands, recoveryKeyCommands, type RecoveryKeyStatus } from "../../lib/tauri";
 import { useCopySecret } from "../../lib/useCopy";
 import { useToastStore } from "../../store/useToastStore";
+import { SecondPasswordField, useDualUnlock } from "../security/SecondPasswordField";
 import { useTranslation } from "../../i18n";
 import { translateBackendError } from "../../i18n/backendErrors";
 
@@ -19,6 +20,8 @@ export function RecoveryKeySection() {
   // a senha mestra é conferida de verdade no comando Rust, não é um "já confirmei" do frontend.
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [reauthPassword, setReauthPassword] = useState("");
+  const [reauthPassword2, setReauthPassword2] = useState("");
+  const dual = useDualUnlock();
   const [reauthError, setReauthError] = useState<string | null>(null);
   const [reauthSubmitting, setReauthSubmitting] = useState(false);
   // A chave só existe em memória do frontend entre gerar e fechar este diálogo — nunca é
@@ -41,6 +44,7 @@ export function RecoveryKeySection() {
   function closeReauth() {
     setPendingAction(null);
     setReauthPassword("");
+    setReauthPassword2("");
     setReauthError(null);
   }
 
@@ -51,10 +55,10 @@ export function RecoveryKeySection() {
     setReauthError(null);
     try {
       if (pendingAction === "generate") {
-        const key = await recoveryKeyCommands.generate(reauthPassword);
+        const key = await recoveryKeyCommands.generate(reauthPassword, dual ? reauthPassword2 : undefined);
         setFreshKey(key);
       } else {
-        await recoveryKeyCommands.disable(reauthPassword);
+        await recoveryKeyCommands.disable(reauthPassword, dual ? reauthPassword2 : undefined);
         push(t("settings.recoveryKey.disabledToast"), "success");
       }
       closeReauth();
@@ -139,12 +143,13 @@ export function RecoveryKeySection() {
               disabled={reauthSubmitting}
             />
           </div>
+          <SecondPasswordField value={reauthPassword2} onChange={setReauthPassword2} disabled={reauthSubmitting} />
           {reauthError && <p className="text-sm text-[var(--color-danger)]">{reauthError}</p>}
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="ghost" onClick={closeReauth} disabled={reauthSubmitting}>
               {t("common.cancel")}
             </Button>
-            <Button type="submit" variant={pendingAction === "disable" ? "danger" : "primary"} disabled={!reauthPassword || reauthSubmitting}>
+            <Button type="submit" variant={pendingAction === "disable" ? "danger" : "primary"} disabled={!reauthPassword || (dual && !reauthPassword2) || reauthSubmitting}>
               {reauthSubmitting ? t("common.verifying") : pendingAction === "disable" ? t("settings.recoveryKey.disableButton") : t("settings.recoveryKey.generateButton")}
             </Button>
           </div>

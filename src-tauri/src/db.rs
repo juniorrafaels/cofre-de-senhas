@@ -375,6 +375,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
     // Identificador estável das plataformas oficiais do Cofre (ver `PlatformSeed`). NULL para
     // qualquer plataforma criada pelo usuário — nunca setado por `create_platform`/`update_platform`.
     migrate_add_column(conn, "platforms", "system_key", "TEXT")?;
+    // Migrações versionadas (`PRAGMA user_version`), cada uma numa transação: ver `MIGRATIONS`.
+    run_migrations(conn, MIGRATIONS)?;
     // Só pode ser criado depois que a coluna acima existe. Único apenas entre plataformas
     // oficiais (system_key IS NOT NULL); plataformas do usuário continuam NULL e nunca colidem
     // entre si aqui (índice parcial).
@@ -397,6 +399,86 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
 
     provision_default_platforms(conn)?;
 
+    Ok(())
+}
+
+/// Uma migração de esquema versionada. `up` roda dentro de uma transação `BEGIN IMMEDIATE` junto
+/// com a gravação de `user_version`: ou tudo é aplicado, ou nada (rollback) e a versão não avança.
+pub struct Migration {
+    pub version: i64,
+    pub name: &'static str,
+    pub up: fn(&Connection) -> Result<(), String>,
+}
+
+/// Migrações versionadas, em ordem crescente de versão. Bancos criados antes deste mecanismo têm
+/// `user_version = 0` e recebem todas elas; as colunas são todas opcionais (`NULL`) ou com default,
+/// então cofres antigos continuam abrindo exatamente como antes (comportamento legado preservado:
+/// política de desbloqueio `NULL` = uma senha; sem segunda senha de recuperação; sem bloqueio
+/// progressivo; contas sem datas).
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "unlock_policy_recovery_password_throttle_account_dates",
+    up: migration_v1,
+}];
+
+fn migration_v1(conn: &Connection) -> Result<(), String> {
+    // Desbloqueio com duas senhas: NULL/'single' = legado (uma senha); 'dual-v1' = duas senhas.
+    migrate_add_column(conn, "vault_meta", "unlock_policy", "TEXT")?;
+    migrate_add_column(conn, "vault_meta", "unlock2_salt", "BLOB")?;
+    migrate_add_column(conn, "vault_meta", "unlock2_kdf_params", "TEXT")?;
+    // Segunda senha de recuperação: envelope independente da DEK (não toca em Recovery Key/Shamir).
+    migrate_add_column(conn, "vault_meta", "recovery_pw_salt", "BLOB")?;
+    migrate_add_column(conn, "vault_meta", "recovery_pw_kdf_params", "TEXT")?;
+    migrate_add_column(conn, "vault_meta", "recovery_pw_wrapped_dek", "BLOB")?;
+    migrate_add_column(conn, "vault_meta", "recovery_pw_created_at", "TEXT")?;
+    // Datas da conta: `last_login_at` é dado do usuário (guardado cifrado, `enc:v2:`);
+    // `update_confirmed_at` é um carimbo de sistema (UTC, como `updated_at`).
+    migrate_add_column(conn, "accounts", "last_login_at", "TEXT")?;
+    migrate_add_column(conn, "accounts", "update_confirmed_at", "TEXT")?;
+    // Bloqueio progressivo. Fica FORA de `vault_meta` e do backup de propósito: restaurar um
+    // backup antigo não pode zerar o contador nem desligar a política.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auth_throttle (
+           scope TEXT PRIMARY KEY,
+           enabled INTEGER NOT NULL DEFAULT 0,
+           failed_count INTEGER NOT NULL DEFAULT 0,
+           locked_until_ms INTEGER NOT NULL DEFAULT 0,
+           wait_ms INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Aplica, em ordem, as migrações com `version > user_version`. Cada uma roda em sua própria
+/// transação `BEGIN IMMEDIATE` (serializa duas instâncias abrindo o banco ao mesmo tempo; a versão
+/// é relida dentro da transação). Idempotente: rodar de novo não faz nada.
+pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<(), String> {
+    let read_version = || -> Result<i64, String> {
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(|e| e.to_string())
+    };
+    for migration in migrations {
+        if read_version()? >= migration.version {
+            continue;
+        }
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+        let result = (|| -> Result<(), String> {
+            if read_version()? >= migration.version {
+                return Ok(()); // outra instância aplicou entre a leitura e o lock
+            }
+            (migration.up)(conn)?;
+            conn.execute_batch(&format!("PRAGMA user_version = {}", migration.version)).map_err(|e| e.to_string())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                let _ = conn.execute_batch("ROLLBACK");
+                format!("migração {} ({}): {e}", migration.version, migration.name)
+            })?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(format!("migração {} ({}) falhou e foi revertida: {e}", migration.version, migration.name));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1104,5 +1186,143 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod versioned_migration_tests {
+    use super::*;
+
+    fn user_version(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().collect::<Result<_, _>>().unwrap()
+    }
+
+    /// Banco no estado de um cofre ANTIGO (anterior a esta migração): sem as colunas novas, sem
+    /// `auth_throttle` e com `user_version = 0`, com dados reais de cofre e de conta.
+    fn legacy_database() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        for (table, column, def) in [
+            ("vault_meta", "dek_check", "BLOB"),
+            ("accounts", "status", "TEXT NOT NULL DEFAULT 'active'"),
+            ("accounts", "deleted_at", "TEXT"),
+            ("accounts", "two_factor_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("accounts", "two_factor_method", "TEXT"),
+            ("accounts", "avatar_image_id", "INTEGER"),
+            ("vault_meta", "recovery_key_salt", "BLOB"),
+            ("vault_meta", "recovery_key_kdf_params", "TEXT"),
+            ("vault_meta", "recovery_key_wrapped_dek", "BLOB"),
+            ("vault_meta", "recovery_key_check", "BLOB"),
+            ("vault_meta", "recovery_key_created_at", "TEXT"),
+        ] {
+            migrate_add_column(&conn, table, column, def).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO vault_meta (id, kdf_salt, kdf_params, wrapped_dek, created_at) VALUES (1, x'0102030405060708', '{}', x'AABB', 'then')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO accounts (name, created_at, updated_at) VALUES ('conta antiga', 'then', 'then')", []).unwrap();
+        assert_eq!(user_version(&conn), 0);
+        conn
+    }
+
+    #[test]
+    fn legacy_database_is_migrated_in_place_preserving_every_existing_row() {
+        let conn = legacy_database();
+        init_schema(&conn).unwrap();
+
+        assert_eq!(user_version(&conn), MIGRATIONS.last().unwrap().version);
+        for column in ["unlock_policy", "unlock2_salt", "unlock2_kdf_params", "recovery_pw_salt", "recovery_pw_kdf_params", "recovery_pw_wrapped_dek", "recovery_pw_created_at"] {
+            assert!(columns(&conn, "vault_meta").contains(&column.to_string()), "vault_meta.{column}");
+        }
+        for column in ["last_login_at", "update_confirmed_at"] {
+            assert!(columns(&conn, "accounts").contains(&column.to_string()), "accounts.{column}");
+        }
+        // Dados antigos intactos e com os padrões legados (política NULL = uma senha, sem datas).
+        let (salt, wrapped, policy): (Vec<u8>, Vec<u8>, Option<String>) = conn
+            .query_row("SELECT kdf_salt, wrapped_dek, unlock_policy FROM vault_meta WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((salt, wrapped, policy), (vec![1, 2, 3, 4, 5, 6, 7, 8], vec![0xAA, 0xBB], None));
+        let (name, last_login, confirmed): (String, Option<String>, Option<String>) = conn
+            .query_row("SELECT name, last_login_at, update_confirmed_at FROM accounts", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert!((name.as_str(), last_login.as_deref(), confirmed.as_deref()) == ("conta antiga", None, None));
+        let throttle_rows: i64 = conn.query_row("SELECT COUNT(*) FROM auth_throttle", [], |r| r.get(0)).unwrap();
+        assert_eq!(throttle_rows, 0, "bloqueio progressivo desativado por padrão em cofres existentes");
+    }
+
+    #[test]
+    fn migrations_are_idempotent() {
+        let conn = legacy_database();
+        init_schema(&conn).unwrap();
+        let snapshot = columns(&conn, "vault_meta");
+        init_schema(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        run_migrations(&conn, MIGRATIONS).unwrap();
+        assert_eq!(columns(&conn, "vault_meta"), snapshot);
+        assert_eq!(user_version(&conn), MIGRATIONS.last().unwrap().version);
+    }
+
+    #[test]
+    fn a_failure_in_the_middle_of_a_migration_leaves_no_partial_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY);").unwrap();
+        fn half_done(conn: &Connection) -> Result<(), String> {
+            conn.execute_batch("ALTER TABLE t ADD COLUMN a TEXT;").map_err(|e| e.to_string())?;
+            conn.execute_batch("CREATE TABLE novo (x INTEGER);").map_err(|e| e.to_string())?;
+            Err("falha simulada no meio".to_string())
+        }
+        let migrations = [Migration { version: 1, name: "metade", up: half_done }];
+        let err = run_migrations(&conn, &migrations).unwrap_err();
+        assert!(err.contains("revertida"), "{err}");
+        assert_eq!(user_version(&conn), 0, "a versão não avança");
+        assert_eq!(columns(&conn, "t"), vec!["id".to_string()], "nenhuma coluna parcial");
+        let novo: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'novo'", [], |r| r.get(0)).unwrap();
+        assert_eq!(novo, 0, "nenhuma tabela parcial");
+    }
+
+    #[test]
+    fn earlier_migrations_stay_applied_when_a_later_one_fails() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY);").unwrap();
+        fn ok(conn: &Connection) -> Result<(), String> {
+            conn.execute_batch("ALTER TABLE t ADD COLUMN a TEXT;").map_err(|e| e.to_string())
+        }
+        fn boom(conn: &Connection) -> Result<(), String> {
+            conn.execute_batch("ALTER TABLE t ADD COLUMN b TEXT;").map_err(|e| e.to_string())?;
+            Err("falha".to_string())
+        }
+        let migrations = [Migration { version: 1, name: "ok", up: ok }, Migration { version: 2, name: "boom", up: boom }];
+        assert!(run_migrations(&conn, &migrations).is_err());
+        assert_eq!(user_version(&conn), 1);
+        assert_eq!(columns(&conn, "t"), vec!["id".to_string(), "a".to_string()]);
+        // Rodar de novo (depois de "corrigir" a migração) retoma da versão 1.
+        fn fixed(conn: &Connection) -> Result<(), String> {
+            conn.execute_batch("ALTER TABLE t ADD COLUMN b TEXT;").map_err(|e| e.to_string())
+        }
+        let migrations = [Migration { version: 1, name: "ok", up: ok }, Migration { version: 2, name: "fixed", up: fixed }];
+        run_migrations(&conn, &migrations).unwrap();
+        assert_eq!(user_version(&conn), 2);
+    }
+
+    #[test]
+    fn two_connections_migrating_the_same_file_do_not_conflict() {
+        let dir = std::env::temp_dir().join(format!("cofre-migr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two.db");
+        let _ = std::fs::remove_file(&path);
+        let a = Connection::open(&path).unwrap();
+        let b = Connection::open(&path).unwrap();
+        init_schema(&a).unwrap();
+        init_schema(&b).unwrap();
+        assert_eq!(user_version(&b), MIGRATIONS.last().unwrap().version);
+        drop((a, b));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

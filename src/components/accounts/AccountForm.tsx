@@ -6,6 +6,7 @@ import { Button } from "../ui/Button";
 import { Avatar } from "../ui/Avatar";
 import { AvatarPicker } from "./AvatarPicker";
 import { PasswordField } from "./PasswordField";
+import { PasswordStrengthMeter } from "../ui/PasswordStrengthMeter";
 import { TagPicker } from "../ui/TagPicker";
 import {
   ACCOUNT_STATUSES,
@@ -24,6 +25,7 @@ import { tryFetch } from "../../lib/secretFields";
 import { useTranslation } from "../../i18n";
 import { accountStatusLabel, twoFactorMethodLabel } from "../../i18n/enumLabels";
 import { translateBackendError } from "../../i18n/backendErrors";
+import { isAllowedExternalUrl } from "../../lib/tauri";
 
 interface Props {
   open: boolean;
@@ -79,6 +81,21 @@ async function decryptSensitiveFields(accountId: number): Promise<{
   return { values, failedFields };
 }
 
+/** `YYYY-MM-DD` do valor guardado (data pura, ou instante UTC convertido para a data local). */
+export function toDateInputValue(stored: string | null | undefined): string {
+  if (!stored) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(stored)) return stored;
+  const ms = Date.parse(stored);
+  if (Number.isNaN(ms)) return "";
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function todayInputValue(): string {
+  return toDateInputValue(new Date().toISOString());
+}
+
 function emptyValues(defaultPlatformId?: number | null): AccountFormValues {
   return {
     name: "",
@@ -101,6 +118,7 @@ function emptyValues(defaultPlatformId?: number | null): AccountFormValues {
     two_factor_email: "",
     two_factor_app: "",
     two_factor_notes: "",
+    last_login_at: "",
   };
 }
 
@@ -156,6 +174,9 @@ export function AccountForm({
         two_factor_email: "",
         two_factor_app: "",
         two_factor_notes: "",
+        // Só a parte de data (YYYY-MM-DD) cabe no <input type="date">; a data guardada pode ser
+        // um instante UTC se veio de outra versão — nesse caso converte para a data local.
+        last_login_at: toDateInputValue(editingAccount.last_login_at),
       });
 
       decryptSensitiveFields(editingAccount.id).then(({ values: decrypted, failedFields }) => {
@@ -304,17 +325,36 @@ export function AccountForm({
               onChange={(v) => setValues((s) => ({ ...s, password: v }))}
               placeholder={editingAccount ? t("accounts.form.passwordPlaceholderEdit") : ""}
             />
+            {/* Mesmo avaliador da senha mestra; só informa (não bloqueia o salvamento). */}
+            <PasswordStrengthMeter password={values.password} />
           </div>
+        </div>
+
+        <div>
+          <Label>{t("accounts.lastLogin.label")}</Label>
+          <Input
+            type="date"
+            value={values.last_login_at}
+            max={todayInputValue()}
+            onChange={(e) => setValues((v) => ({ ...v, last_login_at: e.target.value }))}
+          />
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">{t("accounts.lastLogin.hint")}</p>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
             <Label>{t("accounts.form.loginUrlLabel")}</Label>
             <Input value={values.login_url} onChange={(e) => setValues((v) => ({ ...v, login_url: e.target.value }))} placeholder="https://..." />
+            {values.login_url.trim() && !isAllowedExternalUrl(values.login_url.trim()) && (
+              <p className="mt-1 text-xs text-[var(--color-danger)]">{t("errors.urlInvalidHint")}</p>
+            )}
           </div>
           <div>
             <Label>{t("accounts.form.websiteUrlLabel")}</Label>
             <Input value={values.website_url} onChange={(e) => setValues((v) => ({ ...v, website_url: e.target.value }))} placeholder="https://..." />
+            {values.website_url.trim() && !isAllowedExternalUrl(values.website_url.trim()) && (
+              <p className="mt-1 text-xs text-[var(--color-danger)]">{t("errors.urlInvalidHint")}</p>
+            )}
           </div>
         </div>
 

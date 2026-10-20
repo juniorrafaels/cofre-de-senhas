@@ -8,6 +8,7 @@ import { AvatarPicker } from "../accounts/AvatarPicker";
 import type { Platform } from "../../types";
 import { useTranslation } from "../../i18n";
 import { translateBackendError } from "../../i18n/backendErrors";
+import { isAllowedExternalUrl } from "../../lib/tauri";
 
 export interface PlatformFormValues {
   name: string;
@@ -122,10 +123,16 @@ export function PlatformForm({ open, onClose, onSubmit, editingPlatform }: Props
         <div>
           <Label>{t("platforms.form.loginUrlLabel")}</Label>
           <Input value={values.login_url} onChange={(e) => setValues((v) => ({ ...v, login_url: e.target.value }))} placeholder="https://..." />
+          {values.login_url.trim() && !isAllowedExternalUrl(values.login_url.trim()) && (
+            <p className="mt-1 text-xs text-[var(--color-danger)]">{t("errors.urlInvalidHint")}</p>
+          )}
         </div>
         <div>
           <Label>{t("platforms.form.websiteUrlLabel")}</Label>
           <Input value={values.website_url} onChange={(e) => setValues((v) => ({ ...v, website_url: e.target.value }))} placeholder="https://..." />
+          {values.website_url.trim() && !isAllowedExternalUrl(values.website_url.trim()) && (
+            <p className="mt-1 text-xs text-[var(--color-danger)]">{t("errors.urlInvalidHint")}</p>
+          )}
         </div>
 
         {error && <p className="text-sm text-[var(--color-danger)]">{error}</p>}

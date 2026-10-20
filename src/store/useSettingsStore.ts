@@ -23,6 +23,7 @@ const DEFAULTS: AppSettings = {
   viewMode: "grid",
   listColumns: DEFAULT_LIST_COLUMNS,
   listScale: 100,
+  showUpdatedBadge: true,
 };
 
 interface SettingsStore extends AppSettings {
@@ -37,6 +38,7 @@ interface SettingsStore extends AppSettings {
   setViewMode: (mode: ViewMode) => Promise<void>;
   setListColumns: (columns: ListColumnKey[]) => Promise<void>;
   setListScale: (scale: ListScale) => Promise<void>;
+  setShowUpdatedBadge: (show: boolean) => Promise<void>;
 }
 
 function applyTheme(theme: ThemePreference) {
@@ -73,6 +75,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
       listScale: (LIST_SCALE_LEVELS as readonly number[]).includes(Number(raw.list_scale))
         ? (Number(raw.list_scale) as ListScale)
         : DEFAULTS.listScale,
+      showUpdatedBadge: raw.show_updated_badge ? raw.show_updated_badge === "true" : DEFAULTS.showUpdatedBadge,
     };
     applyTheme(next.theme);
     useLocaleStore.getState().setLocale(next.language);
@@ -115,6 +118,10 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   setListScale: async (scale) => {
     await setSetting("list_scale", String(scale));
     set({ listScale: scale });
+  },
+  setShowUpdatedBadge: async (show) => {
+    await setSetting("show_updated_badge", String(show));
+    set({ showUpdatedBadge: show });
   },
 }));
 

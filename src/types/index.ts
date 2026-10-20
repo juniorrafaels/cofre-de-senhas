@@ -109,6 +109,16 @@ export interface Account {
   two_factor_method: TwoFactorMethod | null;
   created_at: string;
   updated_at: string;
+  /** Data do último login informada pelo usuário — distinta de created_at/updated_at. */
+  last_login_at?: string | null;
+  /** Instante UTC da última confirmação manual de "atualizada"; null se ausente/ilegível. */
+  update_confirmed_at?: string | null;
+  /** Fim da validade do selo (confirmação + 90 dias), se houver confirmação legível. */
+  update_expires_at?: string | null;
+  /** Estado calculado pelo backend na listagem; a interface reavalia com o relógio atual. */
+  update_badge?: "valid" | "expired" | "none";
+  /** Colunas de metadado que não puderam ser lidas (adulteradas/copiadas); vazio no caso normal. */
+  unreadable_fields?: string[];
 }
 
 export interface AccountWithRelations extends Account {
@@ -139,6 +149,7 @@ export interface AccountFormValues {
   two_factor_email: string;
   two_factor_app: string;
   two_factor_notes: string;
+  last_login_at: string;
 }
 
 export type PropertyType = "text" | "number" | "phone" | "email" | "url" | "date" | "boolean" | "longtext";
@@ -192,7 +203,7 @@ export function isValidLocale(value: unknown): value is Locale {
   return typeof value === "string" && (SUPPORTED_LOCALES as readonly string[]).includes(value);
 }
 
-export type ListColumnKey = "avatar" | "name" | "platform" | "username" | "email" | "project" | "status" | "tags" | "updated_at" | "two_factor";
+export type ListColumnKey = "avatar" | "name" | "platform" | "username" | "email" | "project" | "status" | "tags" | "updated_at" | "two_factor" | "last_login";
 
 // Ordem estável de exibição — labels traduzidos em `src/i18n/enumLabels.ts`.
 export const ALL_LIST_COLUMNS: ListColumnKey[] = [
@@ -206,6 +217,7 @@ export const ALL_LIST_COLUMNS: ListColumnKey[] = [
   "tags",
   "updated_at",
   "two_factor",
+  "last_login",
 ];
 
 export const DEFAULT_LIST_COLUMNS: ListColumnKey[] = ["avatar", "name", "platform", "username", "status"];
@@ -225,6 +237,8 @@ export interface AppSettings {
   viewMode: ViewMode;
   listColumns: ListColumnKey[];
   listScale: ListScale;
+  /** Exibe o selo "Atualizada" (preferência de exibição; nunca altera dados armazenados). */
+  showUpdatedBadge: boolean;
 }
 
 // ---------- Gerador de senhas (Configurações → Gerador de Senhas) ----------

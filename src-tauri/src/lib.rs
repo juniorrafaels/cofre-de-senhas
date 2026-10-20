@@ -1,12 +1,17 @@
+mod account_status;
+mod auth;
 mod commands;
 mod crypto;
 mod db;
+mod instance_lock;
+mod lockout;
 mod migration;
 mod native_lock;
 mod state;
 mod validate;
 
 use state::VaultState;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -14,8 +19,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(VaultState::new())
+        // Exclusividade de cofre aberto entre instâncias (ver `instance_lock`): enquanto o caminho do
+        // arquivo de controle não for definido em `setup`, nenhum desbloqueio é permitido.
+        .manage(VaultState::with_exclusive_lock())
         .setup(|app| {
+            match app.path().app_data_dir() {
+                Ok(dir) => app.state::<VaultState>().set_exclusive_path(dir.join("vault-unlocked.lock")),
+                Err(_) => eprintln!("[instance_lock] diretório de dados não resolvido; o cofre não poderá ser desbloqueado."),
+            }
             // Best-effort: nunca falha o startup do app (ver doc de `native_lock`).
             native_lock::install(&app.handle().clone());
             Ok(())
@@ -57,6 +68,15 @@ pub fn run() {
             commands::recovery_key::generate_recovery_key,
             commands::recovery_key::disable_recovery_key,
             commands::recovery_key::unlock_with_recovery_key,
+            commands::recovery_password::recovery_password_status,
+            commands::recovery_password::set_recovery_password,
+            commands::recovery_password::disable_recovery_password,
+            commands::recovery_password::unlock_with_recovery_password,
+            commands::unlock_policy::unlock_gate_status,
+            commands::unlock_policy::enable_dual_unlock,
+            commands::unlock_policy::disable_dual_unlock,
+            commands::unlock_policy::change_second_unlock_password,
+            commands::unlock_policy::set_unlock_throttle,
             commands::platforms::list_platforms,
             commands::platforms::create_platform,
             commands::platforms::update_platform,
@@ -77,6 +97,7 @@ pub fn run() {
             commands::accounts::archive_account,
             commands::accounts::unarchive_account,
             commands::accounts::toggle_favorite,
+            commands::accounts::mark_account_updated,
             commands::accounts::reveal_account_password,
             commands::accounts::copy_account_password,
             commands::accounts::get_account_notes,

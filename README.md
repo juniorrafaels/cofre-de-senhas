@@ -17,7 +17,7 @@
 
 [Funcionalidades](#funcionalidades) ·
 [Como instalar](#como-instalar) ·
-[Segurança](#segurança-e-limitações-conhecidas) ·
+[Segurança](#limitações-e-alertas-importantes-trade-offs) ·
 [Contribuir](#como-contribuir) ·
 [English](#english-summary)
 
@@ -36,7 +36,7 @@ entregar esses dados a um serviço de terceiros.
 
 > **Estágio do projeto: beta, mantido por uma pessoa.** O código passou por revisões de
 > segurança internas (registradas neste repositório), mas **não por uma auditoria independente**.
-> Leia [Segurança e limitações conhecidas](#segurança-e-limitações-conhecidas) antes de confiar
+> Leia [Limitações e Alertas Importantes (Trade-offs)](#limitações-e-alertas-importantes-trade-offs) antes de confiar
 > nele as suas senhas mais importantes, e mantenha backups.
 
 ## Como instalar
@@ -46,7 +46,7 @@ entregar esses dados a um serviço de terceiros.
 
 | Você quer… | Faça isto |
 |---|---|
-| **Só usar o app** | Baixe o arquivo `…_x64-setup.exe` na página **[Releases](https://github.com/juniorrafaels/cofre-de-senhas/releases)**, instale e abra **Cofre de Contas** pelo menu Iniciar. *(Ainda não há versão publicada; enquanto isso, use a linha abaixo.)* |
+| **Só usar o app** | Baixe o arquivo `…_x64-setup.exe` na página **[Releases](https://github.com/juniorrafaels/cofre-de-senhas/releases)**, instale e abra **Cofre de Contas** pelo menu Iniciar. *(A `v0.1.0-beta.1` foi publicada como ZIP de artefatos do CI; a partir da próxima versão os instaladores e o `SHA256SUMS.txt` ficam soltos na release. Confira o hash antes de instalar — veja [docs/INSTALACAO.md](docs/INSTALACAO.md).)* |
 | **Gerar o instalador a partir do código** | Instale Node.js, Rust e o compilador C++ da Microsoft (comandos no guia), extraia o ZIP e dê dois cliques em **`Compilar instalador.bat`**. No final, a pasta com o instalador abre sozinha |
 | **Desenvolver / contribuir** | Siga [Compilar a partir do código-fonte](#compilar-a-partir-do-código-fonte-desenvolvedores) |
 
@@ -61,19 +61,35 @@ desinstalação:** [docs/INSTALACAO.md](docs/INSTALACAO.md).
 - **Recovery Key** opcional (com kit de recuperação para imprimir) para recuperar o acesso.
 - **Backup criptografado** (`.vaultbackup`) para exportar e importar o cofre inteiro. Restaurar
   sobre um cofre existente exige a senha mestra atual.
-- *Perguntas de segurança (descontinuado):* cofres antigos que já as têm continuam podendo usá-las
-  para recuperar o acesso, mas não é possível criar novas (ver [Segurança](#segurança-e-limitações-conhecidas)).
+- **Perguntas de segurança** (opcional, com riscos documentados): recuperação offline da senha
+  mestra com 3 respostas corretas; você escolhe quantas perguntas cadastrar (ver
+  [Limitações e Alertas Importantes](#limitações-e-alertas-importantes-trade-offs)).
+- **Segunda senha de recuperação** (opcional): uma senha extra, independente do desbloqueio normal,
+  da Recovery Key e das perguntas, que recupera a mesma chave dos dados.
+- **Desbloqueio com duas senhas** (opcional, desligado por padrão): o cofre só abre com as duas
+  senhas, exigido pelo backend. Perder uma delas impede o desbloqueio normal — leia o aviso antes de
+  ativar.
+- **Bloqueio progressivo** por tentativas incorretas (opcional, desligado por padrão): espera de 15 s
+  até 4 h, guardada no aplicativo e válida entre janelas e reinícios.
+- Detalhes, formatos e limites de cada opção: [docs/CREDENCIAIS_E_RECUPERACAO.md](docs/CREDENCIAIS_E_RECUPERACAO.md).
 
 **Proteção durante o uso**
 - Bloqueio automático por inatividade (tempo configurável).
 - Bloqueio ao minimizar (opcional).
 - Bloqueio quando o Windows é bloqueado (Win+L) ou entra em suspensão.
+- **Um cofre aberto por vez** em toda a instalação: uma segunda janela/instância não consegue abrir
+  outro cofre enquanto o primeiro estiver desbloqueado (lock do sistema operacional, liberado
+  automaticamente se o app fechar de forma inesperada).
 - Copiar senha sem exibi-la, com limpeza automática da área de transferência. No Windows, segredos
   copiados ficam fora do Histórico (Win+V) e da sincronização em nuvem.
-- Limite de tentativas para revelar segredos e para a recuperação por perguntas legadas.
+- Limite de tentativas para revelar segredos e para a recuperação por perguntas.
 
 **Organização**
 - Contas agrupadas por **projetos** e **plataformas** (19 plataformas pré-cadastradas, editáveis).
+- **Data do último login** por conta e selo **"Atualizada"** (válido por 90 dias, renovado só pela
+  ação "Marcar como atualizada"); a coluna e o selo podem ser exibidos ou ocultados em Configurações.
+- **Indicador de força** da senha ao cadastrar/editar uma conta (mesmo avaliador da senha mestra;
+  apenas informa, nunca bloqueia o salvamento).
 - **Etiquetas**, favoritos, arquivo e **lixeira** com restauração.
 - **Propriedades personalizadas** por conta (ex.: "Chave de API"), sensíveis ou não.
 - **Histórico** de alterações por conta e status da conta.
@@ -108,7 +124,7 @@ citados pertencem aos respectivos donos.
 - **SQLite** (via `rusqlite`, embutido) como armazenamento local
 - Criptografia: `argon2`, `chacha20poly1305`, `hkdf`, `sha2`, `zeroize` (RustCrypto)
 
-## Segurança e limitações conhecidas
+## Limitações e Alertas Importantes (Trade-offs)
 
 Resumo abaixo. O modelo de segurança completo está em [SECURITY.md](SECURITY.md).
 
@@ -119,14 +135,17 @@ dificuldade depende da força da senha mestra.
 **O que o Cofre não protege:**
 - Um computador já comprometido (malware, keylogger, acesso administrativo enquanto o cofre está
   aberto). Nenhum gerenciador de senhas local resolve isso.
-- **Metadados em texto claro:** nomes de contas, usuários, e-mails, URLs, status, plataformas,
-  projetos (incluindo as notas de projeto), etiquetas, propriedades não sensíveis, o texto das
-  perguntas de segurança, o histórico de alterações e as imagens/avatares ficam legíveis para quem
-  tiver acesso ao arquivo do cofre. Apenas senhas, notas da conta, detalhes de 2FA e propriedades
-  marcadas como sensíveis são cifrados.
-- **Perguntas de segurança legadas são o elo mais fraco:** cada resposta pode ser testada
-  isoladamente, offline, por quem obtiver o arquivo do cofre ou um backup. Por isso o recurso foi
-  descontinuado. Se o seu cofre ainda tem perguntas, gere uma **Recovery Key** e exclua-as.
+- **Metadados em texto claro (o que sobrou):** etiquetas, projetos (incluindo as notas de
+  projeto), plataformas, propriedades não sensíveis, o texto das perguntas de segurança, status,
+  favoritos, datas, vínculos e as imagens/avatares ficam legíveis para quem tiver acesso ao arquivo
+  do cofre. **Nome da conta, usuário, e-mail, URLs, categoria e o detalhe do histórico são cifrados**
+  (`enc:v2:`, XChaCha20-Poly1305, com AAD de tabela/coluna/linha) — cofres antigos são migrados
+  automaticamente no desbloqueio, com um backup pré-migração cifrado (`vault.db.pre-v2.bak`).
+  Vestígios do texto puro antigo ainda podem existir em páginas livres do SQLite, no SSD, em cópias
+  de sombra e em backups feitos antes da migração. Detalhes em [SECURITY.md](SECURITY.md).
+- **Perguntas de segurança são o elo mais fraco** (se você ativá-las): cada resposta pode ser
+  testada isoladamente, offline, por quem obtiver o arquivo do cofre ou um backup. É um recurso
+  opcional; veja a subseção abaixo e prefira uma **Recovery Key**, que é aleatória.
 - Trocar a senha mestra não recriptografa os dados: um backup antigo mais a senha antiga dele
   continuam permitindo abrir os dados. Guarde backups com cuidado e apague os antigos.
 - Área de transferência: marcar segredos para ficar fora do Win+V é um pedido ao Windows. Outros
@@ -134,13 +153,54 @@ dificuldade depende da força da senha mestra.
 - O bloqueio automático pode ser desativado (valor 0) e o bloqueio ao minimizar vem desligado por
   padrão. O bloqueio no Win+L/suspensão existe só no Windows.
 - Excluir uma conta não garante remoção forense dos dados do disco (SQLite WAL, SSD).
-- Esquecer a senha mestra **sem** Recovery Key = perda definitiva dos dados.
+- Esquecer a senha mestra **sem** Recovery Key e sem perguntas de segurança válidas = perda definitiva dos dados.
 - Sem sincronização: se o disco falhar sem backup, os dados se perdem. Exporte backups.
 - Builds não são assinados digitalmente ainda; o Windows SmartScreen pode alertar.
 - Não houve auditoria de segurança independente.
 
 **Encontrou uma vulnerabilidade?** Não abra uma issue pública. Siga as instruções em
 [SECURITY.md](SECURITY.md).
+
+### Recuperação por perguntas de segurança (opcional)
+
+Recurso **opcional**: você escolhe se quer ativá-lo, e quantas perguntas cadastrar (1 a 20).
+Se não cadastrar nenhuma, o desbloqueio normal fica exatamente igual. Para desativar, remova
+todas as perguntas em Configurações (exige a senha mestra atual). Funciona **totalmente offline**.
+
+- **Como funciona:** a chave que cifra os dados (DEK) é dividida com *Shamir Secret Sharing*
+  (crate `sharks`) com limiar fixo de **3**: uma share por pergunta. Cada share é cifrada com
+  XChaCha20-Poly1305 por uma chave derivada de **uma única resposta** (Argon2id, 128 MiB,
+  3 iterações, salt aleatório por pergunta; resposta normalizada com `trim` + minúsculas).
+  Na recuperação o app sorteia até 5 perguntas e é preciso acertar **pelo menos 3**; a DEK
+  reconstruída é conferida contra `dek_check` antes de qualquer desbloqueio. Só então é possível
+  definir uma nova senha mestra, e isso só vale em sessão aberta por recuperação.
+- **Com menos de 3 perguntas a recuperação não funciona** (o limiar de 3 é parte do formato). O app
+  permite salvar 1 ou 2, mas avisa que ainda não bastam. O teto de 20 é o do desenho original
+  (o limite técnico do formato é 255 shares).
+- **O que fica no `vault.db`:** o **texto** das perguntas (em claro), o salt, os parâmetros do
+  Argon2id e a share cifrada. Respostas e DEK nunca são gravadas em claro, nem registradas em logs
+  ou mensagens de erro.
+- **Limite de tentativas:** 5 falhas bloqueiam novas tentativas por 15 minutos, e cada pedido aceita
+  no máximo 5 respostas (sem IDs repetidos). O contador fica no próprio banco: ele limita a
+  interface, **não** impede ataque offline contra uma cópia do arquivo.
+- **Riscos (factuais):**
+  - Quem copiar o `vault.db` (ou um backup) pode testar **cada resposta offline e
+    separadamente**, sem limite de tentativas. O custo do ataque é aproximadamente a *soma* dos
+    dicionários de cada pergunta, não o produto. Argon2id encarece cada tentativa, mas não
+    elimina esse risco.
+  - Respostas pessoais costumam ser previsíveis ou fáceis de pesquisar. Use respostas longas e
+    únicas (a resposta não precisa ser a verdadeira, mas você precisa guardá-la).
+  - Mais perguntas podem dificultar, mas **não** garantem uma quantidade específica de entropia.
+  - Uma **Recovery Key** aleatória (120 bits) tem propriedades de segurança diferentes e mais fortes
+    do que respostas escolhidas por uma pessoa.
+  - `sharks` 0.5.0 tem o aviso RUSTSEC-2024-0398 (coeficientes do polinômio sorteados em 1..=255,
+    nunca 0). Pelo código da crate, o viés é pequeno e, neste app, os coeficientes vêm de um
+    ChaCha20 semeado pela própria DEK; o elo fraco prático são as respostas, não esse viés. Não foi
+    feita análise formal do impacto. A crate aparenta não ter manutenção.
+- **Se você perder a senha mestra** e não tiver Recovery Key nem pelo menos 3 respostas corretas
+  entre as perguntas sorteadas, os dados são perdidos definitivamente.
+- **Cofres já existentes** com perguntas continuam funcionando sem migração, e os backups
+  `.vaultbackup` incluem as perguntas (cifradas como no banco).
 
 ## Requisitos do sistema
 
@@ -246,7 +306,10 @@ npx tsc --noEmit                                    # checagem de tipos
 cargo test --manifest-path src-tauri/Cargo.toml --lib   # testes do backend Rust
 ```
 
-Os testes do Rust usam bancos em memória e dados sintéticos; eles não tocam no seu cofre real.
+Os testes do Rust usam bancos em memória (ou arquivos temporários) e dados sintéticos; eles não
+tocam no seu cofre real. Alguns testes iniciam processos filhos para verificar a exclusividade entre
+instâncias (lock do SO); rodam em Windows e usam `File::try_lock` (Rust ≥ 1.89). A suíte do Rust
+leva alguns minutos porque várias provas usam o Argon2id real.
 
 Alguns comportamentos só podem ser conferidos com o app aberto (histórico Win+V, restauração de
 backup pela interface, recuperação de acesso). O roteiro, com um script que isola o seu cofre real
@@ -287,8 +350,8 @@ vaults, and does not offer browser autofill, mobile apps or sync. **Beta softwar
 independently audited.**
 
 **How to install:** download the `…_x64-setup.exe` file from the
-[Releases](https://github.com/juniorrafaels/cofre-de-senhas/releases) page (no release has been
-published yet). Or build it yourself: install Node.js LTS, Rust (rustup) and the Microsoft C++
+[Releases](https://github.com/juniorrafaels/cofre-de-senhas/releases) page (check the SHA-256 in
+`SHA256SUMS.txt` before installing; installers are not code-signed, so Windows SmartScreen may warn). Or build it yourself: install Node.js LTS, Rust (rustup) and the Microsoft C++
 Build Tools (see the `winget` commands above), extract the source ZIP and double-click
 **`Compilar instalador.bat`**. When it finishes, the folder with the installer opens
 automatically. Then open **Cofre de Contas** from the Start menu, create a master password and

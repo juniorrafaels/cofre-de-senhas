@@ -3,8 +3,8 @@
 [advisories]
 ignore = [
     # sharks 0.5.0 — viés nos coeficientes do polinômio do Shamir (sem versão corrigida).
-    # Usado SOMENTE para recuperar cofres que já tinham perguntas de segurança cadastradas antes
-    # da descontinuação do recurso. Criar ou alterar perguntas está bloqueado no backend
-    # (security_questions.rs). Remover junto com o suporte legado às perguntas.
+    # Usado na recuperação por perguntas de segurança (recurso opcional, criar/editar/recuperar em
+    # security_questions.rs). Riscos e impacto documentados em SECURITY.md. Só remover se o
+    # mecanismo for substituído por decisão do proprietário.
     "RUSTSEC-2024-0398",
 ]

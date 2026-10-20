@@ -65,17 +65,27 @@ struct ValidatedPlatformInput {
 }
 
 fn validate_input(input: &PlatformFormInput) -> Result<ValidatedPlatformInput, String> {
+    validate_input_keeping_legacy_urls(input, None, None)
+}
+
+/// Ver `accounts::validate_input_keeping_legacy_urls`: URL idêntica à gravada no banco é mantida
+/// sem revalidar (plataforma antiga continua editável); URL nova ou alterada é validada por completo.
+fn validate_input_keeping_legacy_urls(
+    input: &PlatformFormInput,
+    existing_login_url: Option<&str>,
+    existing_website_url: Option<&str>,
+) -> Result<ValidatedPlatformInput, String> {
     let name = validate::trim_required(&input.name, "O nome da plataforma", NAME_MAX)?;
     let icon = match &input.icon {
         Some(v) => validate::trim_optional(v, ICON_MAX, "O ícone")?,
         None => None,
     };
     let login_url = match &input.login_url {
-        Some(v) => validate::trim_optional(v, URL_MAX, "A URL de login")?,
+        Some(v) => validate::http_url_optional_keeping_legacy(v, existing_login_url, URL_MAX, "A URL de login")?,
         None => None,
     };
     let website_url = match &input.website_url {
-        Some(v) => validate::trim_optional(v, URL_MAX, "A URL do site")?,
+        Some(v) => validate::http_url_optional_keeping_legacy(v, existing_website_url, URL_MAX, "A URL do site")?,
         None => None,
     };
     Ok(ValidatedPlatformInput { name, icon, login_url, website_url })
@@ -132,8 +142,16 @@ pub fn reorder_platforms(app: AppHandle, state: State<VaultState>, ordered_ids: 
 pub fn update_platform(app: AppHandle, state: State<VaultState>, id: i64, input: PlatformFormInput) -> Result<(), String> {
     require_unlocked(&state)?;
     validate::positive_id(id, "id")?;
-    let v = validate_input(&input)?;
     let conn = db::open(&app)?;
+    let (existing_login_url, existing_website_url): (Option<String>, Option<String>) = conn
+        .query_row("SELECT login_url, website_url FROM platforms WHERE id = ?1", [id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or((None, None)); // id inexistente: o UPDATE abaixo continua sendo um no-op, como antes
+    let v =
+        validate_input_keeping_legacy_urls(&input, existing_login_url.as_deref(), existing_website_url.as_deref())?;
     conn.execute(
         "UPDATE platforms SET name = ?1, icon = ?2, login_url = ?3, website_url = ?4, logo_image_id = ?5 WHERE id = ?6",
         params![v.name, v.icon, v.login_url, v.website_url, input.logo_image_id, id],
@@ -177,4 +195,38 @@ pub fn reassign_accounts_platform(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(login_url: Option<&str>, website_url: Option<&str>) -> PlatformFormInput {
+        PlatformFormInput {
+            name: "Plataforma".to_string(),
+            icon: None,
+            login_url: login_url.map(str::to_string),
+            website_url: website_url.map(str::to_string),
+            logo_image_id: None,
+        }
+    }
+
+    #[test]
+    fn new_platform_urls_are_fully_validated() {
+        assert!(validate_input(&input(Some("https://example.com/login"), None)).is_ok());
+        for bad in ["javascript:alert(1)", "file:///C:/x", "example.com", "https://good.com\\@evil.com"] {
+            assert!(validate_input(&input(Some(bad), None)).is_err(), "login_url {bad:?}");
+            assert!(validate_input(&input(None, Some(bad))).is_err(), "website_url {bad:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_platform_urls_stay_editable_but_changes_are_validated() {
+        let legacy = input(Some("example.com"), Some("javascript:alert(1)"));
+        let kept = validate_input_keeping_legacy_urls(&legacy, Some("example.com"), Some("javascript:alert(1)")).unwrap();
+        assert_eq!(kept.login_url.as_deref(), Some("example.com"));
+        assert_eq!(kept.website_url.as_deref(), Some("javascript:alert(1)"));
+        assert!(validate_input_keeping_legacy_urls(&legacy, None, None).is_err());
+        assert!(validate_input_keeping_legacy_urls(&legacy, Some("outro.com"), Some("javascript:alert(1)")).is_err());
+    }
 }

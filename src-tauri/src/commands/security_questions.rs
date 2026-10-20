@@ -1,11 +1,11 @@
+use crate::commands::vault::{opt_secret, verify_credentials};
+#[cfg(test)]
 use crate::commands::vault::verify_current_password;
 use crate::crypto::{self, KdfParams};
 use crate::db;
 use crate::state::VaultState;
 use rand::seq::SliceRandom;
-#[cfg(test)]
 use rand::SeedableRng;
-#[cfg(test)]
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 use sharks::{Share, Sharks};
@@ -19,18 +19,12 @@ const RECOVERY_QUESTIONS_SHOWN: usize = 5;
 const LOCKOUT_FAILURE_THRESHOLD: i64 = 5;
 const LOCKOUT_MINUTES: i64 = 15;
 
-#[cfg(test)]
 const DEALER_CONTEXT: &[u8] = b"cofre-de-contas/security-questions-dealer/v1";
 const DEK_CHECK_PLAINTEXT: &[u8] = b"vault-dek-check-v1";
 
 fn generic_error() -> String {
     "Não foi possível concluir a operação.".to_string()
 }
-
-/// Mensagem devolvida por `add_security_question`/`update_security_question`. Mapeada para i18n
-/// no frontend (`errors.securityQuestionsDeprecated`).
-pub const DEPRECATED_MESSAGE: &str =
-    "As perguntas de segurança foram descontinuadas por motivos de segurança. Gere uma Recovery Key.";
 
 /// Mensagem para pedidos de recuperação malformados (mais respostas do que perguntas exibidas,
 /// IDs repetidos, resposta absurdamente longa). Rejeitados ANTES de qualquer derivação de chave.
@@ -39,15 +33,21 @@ pub const INVALID_RECOVERY_REQUEST: &str = "Requisição de recuperação invál
 /// Tamanho máximo (em caracteres) aceito para uma resposta durante a recuperação.
 const MAX_ANSWER_CHARS: usize = 1024;
 
+/// Tamanho máximo (em caracteres) aceito para o texto de uma pergunta.
+const MAX_QUESTION_CHARS: usize = 500;
+
+/// O dealer do `sharks` avalia o polinômio em x = 1..=255 (GF(256)): é o limite técnico duro de
+/// quantas shares distintas existem. `MAX_QUESTIONS` (20, como no desenho original) fica bem abaixo.
+const MAX_SHARE_INDEX: i64 = 255;
+
 /// Recalcula, de forma determinística, o share nº `share_index` (1-based) do segredo (a DEK).
-/// Como a seed é derivada da própria DEK, o mesmo índice sempre produz o mesmo share.
+/// Como a seed é derivada da própria DEK, o mesmo índice sempre produz o mesmo share — não é
+/// preciso guardar o polinômio nem reunir respostas antigas para adicionar/remover perguntas.
 ///
-/// Só existe em testes: criar/regravar shares foi desativado em produção (ver
-/// `add_security_question`). Mesmo assim não pode entrar em pânico: o dealer do `sharks` gera no
-/// máximo 255 shares (x = 1..=255 em GF(256)), então qualquer índice fora disso vira erro.
-#[cfg(test)]
+/// Não pode entrar em pânico: o dealer do `sharks` gera no máximo 255 shares (x = 1..=255 em
+/// GF(256)), então qualquer índice fora disso vira erro.
 fn share_for_index(dek: &[u8; 32], share_index: i64) -> Result<Vec<u8>, String> {
-    if !(1..=255).contains(&share_index) {
+    if !(1..=MAX_SHARE_INDEX).contains(&share_index) {
         return Err(generic_error());
     }
     let seed = crypto::derive_deterministic_seed(dek, DEALER_CONTEXT);
@@ -64,29 +64,12 @@ fn normalize_answer(answer: &str) -> Zeroizing<String> {
     Zeroizing::new(answer.trim().to_lowercase())
 }
 
-/// Lógica de criação herdada (antes usada por `add_security_question`), mantida só para os testes
-/// montarem cofres "legados" que já tinham perguntas cadastradas — é assim que garantimos que
-/// quem já tem perguntas continua conseguindo recuperar o cofre.
-#[cfg(test)]
-fn insert_legacy_question(
-    conn: &rusqlite::Connection,
-    dek: &[u8; 32],
-    question: &str,
-    share_index: i64,
-    answer: &str,
-    params: &KdfParams,
-) -> Result<i64, String> {
-    let share_bytes = share_for_index(dek, share_index)?;
+fn wrap_share(share_bytes: &[u8], answer: &str, params: &KdfParams) -> Result<(Vec<u8>, String, Vec<u8>), String> {
     let salt = crypto::random_bytes(crypto::SALT_LEN);
     let key = crypto::derive_key(&normalize_answer(answer), &salt, params).map_err(|_| generic_error())?;
-    let wrapped = crypto::encrypt(&key, &share_bytes).map_err(|_| generic_error())?;
+    let wrapped = crypto::encrypt(&key, share_bytes).map_err(|_| generic_error())?;
     let params_json = serde_json::to_string(params).map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO security_questions (question, share_index, answer_salt, kdf_params, wrapped_share, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![question, share_index, salt, params_json, wrapped, db::now_iso()],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(conn.last_insert_rowid())
+    Ok((salt, params_json, wrapped))
 }
 
 fn try_unwrap_share(answer: &str, salt: &[u8], params_json: &str, wrapped: &[u8]) -> Option<Vec<u8>> {
@@ -113,39 +96,200 @@ pub fn security_questions_summary(app: AppHandle) -> Result<SecurityQuestionsSum
     Ok(SecurityQuestionsSummary { count, max_allowed: MAX_QUESTIONS, min_required_for_recovery: RECOVERY_THRESHOLD })
 }
 
-/// DESCONTINUADO (auditoria de segurança): cada share do Shamir era protegida por uma chave
-/// derivada de UMA única resposta, com sua própria tag AEAD — ou seja, quem obtiver o arquivo do
-/// cofre consegue testar cada resposta offline de forma independente (custo do ataque = SOMA dos
-/// dicionários, não o produto), e respostas a perguntas pessoais têm pouquíssima entropia. Além
-/// disso o `sharks` 0.5 tem o RUSTSEC-2024-0398 (coeficientes enviesados) e parece sem manutenção.
-/// Criar novas perguntas foi desativado; cofres que já têm perguntas continuam podendo usá-las
-/// para recuperar o acesso (sem migração de formato), e o usuário pode removê-las.
+/// Adicionar/editar/remover pergunta exige o cofre desbloqueado E a senha mestra atual,
+/// reverificada no próprio comando (SECURITY_AUDIT_PHASE_4.md) — essas ações alteram um dos dois
+/// mecanismos de recuperação do cofre.
 ///
-/// A assinatura não recebe mais nenhum argumento de propósito: uma chamada antiga com
-/// `question`/`answer`/`currentPassword` é aceita pelo IPC (chaves extras são ignoradas) e cai
-/// direto neste erro, sem que a resposta seja processada.
+/// Recurso OPCIONAL e com riscos documentados (SECURITY.md): cada share de Shamir é protegida por
+/// uma chave derivada de UMA única resposta, então quem copiar o `vault.db` pode testar cada
+/// resposta offline e isoladamente; a quantidade de perguntas não equivale a entropia garantida.
 #[tauri::command]
-pub fn add_security_question() -> Result<(), String> {
-    Err(DEPRECATED_MESSAGE.to_string())
-}
-
-/// DESCONTINUADO (ver `add_security_question`). Trocar a resposta re-embrulhava a share com uma
-/// nova chave derivada só da nova resposta — o mesmo oráculo offline de antes, então foi
-/// bloqueado. Editar só o texto da pergunta não re-embrulhava nada, mas também foi bloqueado por
-/// simplicidade e para não incentivar o uso contínuo de um mecanismo descontinuado.
-#[tauri::command]
-pub fn update_security_question() -> Result<(), String> {
-    Err(DEPRECATED_MESSAGE.to_string())
-}
-
-#[tauri::command]
-pub fn delete_security_question(app: AppHandle, state: State<VaultState>, current_password: String, id: i64) -> Result<(), String> {
+pub fn add_security_question(
+    app: AppHandle,
+    state: State<VaultState>,
+    current_password: String,
+    question: String,
+    answer: String,
+    current_password2: Option<String>,
+) -> Result<(), String> {
     let current_password = Zeroizing::new(current_password);
+    let current_password2 = opt_secret(current_password2);
+    let answer = Zeroizing::new(answer);
+    let conn = db::open(&app)?;
+    add_question_with(&conn, &state, &current_password, current_password2.as_ref(), &question, &answer, &KdfParams::default())
+}
+
+fn validate_question_text(question: &str) -> Result<String, String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err("A pergunta não pode ficar vazia.".to_string());
+    }
+    if question.chars().count() > MAX_QUESTION_CHARS {
+        return Err("A pergunta é longa demais.".to_string());
+    }
+    Ok(question)
+}
+
+fn validate_answer_text(answer: &str) -> Result<(), String> {
+    if answer.trim().is_empty() {
+        return Err("A resposta não pode ficar vazia.".to_string());
+    }
+    if answer.chars().count() > MAX_ANSWER_CHARS {
+        return Err("A resposta é longa demais.".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn add_question_core(
+    conn: &rusqlite::Connection,
+    state: &VaultState,
+    current_password: &Zeroizing<String>,
+    question: &str,
+    answer: &Zeroizing<String>,
+    params: &KdfParams,
+) -> Result<(), String> {
+    add_question_with(conn, state, current_password, None, question, answer, params)
+}
+
+pub(crate) fn add_question_with(
+    conn: &rusqlite::Connection,
+    state: &VaultState,
+    current_password: &Zeroizing<String>,
+    current_password2: Option<&Zeroizing<String>>,
+    question: &str,
+    answer: &Zeroizing<String>,
+    params: &KdfParams,
+) -> Result<(), String> {
+    if !state.is_unlocked() {
+        return Err("O cofre está bloqueado.".to_string());
+    }
+    let question = validate_question_text(question)?;
+    validate_answer_text(answer)?;
+    verify_credentials(conn, current_password, current_password2)?;
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM security_questions", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if count >= MAX_QUESTIONS {
+        return Err("Você atingiu o limite de 20 perguntas de segurança.".to_string());
+    }
+
+    // Menor índice de share livre (e não MAX+1): remover e adicionar perguntas repetidamente não
+    // pode esgotar os 255 índices possíveis. Reusar o x de uma pergunta já removida é seguro — a
+    // share é recalculada da DEK e a linha antiga deixou de existir.
+    let used: std::collections::HashSet<i64> = conn
+        .prepare("SELECT share_index FROM security_questions")
+        .map_err(|e| e.to_string())?
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    let next_index = (1..=MAX_SHARE_INDEX).find(|i| !used.contains(i)).ok_or_else(generic_error)?;
+
+    let (salt, params_json, wrapped) = state
+        .with_dek(|dek| wrap_share(&share_for_index(dek, next_index)?, answer, params))
+        .ok_or_else(|| "O cofre está bloqueado.".to_string())??;
+
+    conn.execute(
+        "INSERT INTO security_questions (question, share_index, answer_salt, kdf_params, wrapped_share, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![question, next_index, salt, params_json, wrapped, db::now_iso()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_security_question(
+    app: AppHandle,
+    state: State<VaultState>,
+    current_password: String,
+    id: i64,
+    question: String,
+    answer: Option<String>,
+    current_password2: Option<String>,
+) -> Result<(), String> {
+    let current_password = Zeroizing::new(current_password);
+    let current_password2 = opt_secret(current_password2);
+    let answer = answer.map(Zeroizing::new);
+    let conn = db::open(&app)?;
+    update_question_with(&conn, &state, &current_password, current_password2.as_ref(), id, &question, answer.as_ref(), &KdfParams::default())
+}
+
+#[cfg(test)]
+pub(crate) fn update_question_core(
+    conn: &rusqlite::Connection,
+    state: &VaultState,
+    current_password: &Zeroizing<String>,
+    id: i64,
+    question: &str,
+    answer: Option<&Zeroizing<String>>,
+    params: &KdfParams,
+) -> Result<(), String> {
+    update_question_with(conn, state, current_password, None, id, question, answer, params)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_question_with(
+    conn: &rusqlite::Connection,
+    state: &VaultState,
+    current_password: &Zeroizing<String>,
+    current_password2: Option<&Zeroizing<String>>,
+    id: i64,
+    question: &str,
+    answer: Option<&Zeroizing<String>>,
+    params: &KdfParams,
+) -> Result<(), String> {
+    if !state.is_unlocked() {
+        return Err("O cofre está bloqueado.".to_string());
+    }
+    let question = validate_question_text(question)?;
+    verify_credentials(conn, current_password, current_password2)?;
+
+    match answer.filter(|a| !a.trim().is_empty()) {
+        Some(new_answer) => {
+            validate_answer_text(new_answer)?;
+            let share_index: i64 = conn
+                .query_row("SELECT share_index FROM security_questions WHERE id = ?1", [id], |row| row.get(0))
+                .map_err(|_| "Pergunta não encontrada.".to_string())?;
+
+            let (salt, params_json, wrapped) = state
+                .with_dek(|dek| wrap_share(&share_for_index(dek, share_index)?, new_answer, params))
+                .ok_or_else(|| "O cofre está bloqueado.".to_string())??;
+
+            conn.execute(
+                "UPDATE security_questions SET question = ?1, answer_salt = ?2, kdf_params = ?3, wrapped_share = ?4 WHERE id = ?5",
+                rusqlite::params![question, salt, params_json, wrapped, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        None => {
+            let changed = conn
+                .execute("UPDATE security_questions SET question = ?1 WHERE id = ?2", rusqlite::params![question, id])
+                .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                return Err("Pergunta não encontrada.".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_security_question(
+    app: AppHandle,
+    state: State<VaultState>,
+    current_password: String,
+    id: i64,
+    current_password2: Option<String>,
+) -> Result<(), String> {
+    let current_password = Zeroizing::new(current_password);
+    let current_password2 = opt_secret(current_password2);
     if !state.is_unlocked() {
         return Err("O cofre está bloqueado.".to_string());
     }
     let conn = db::open(&app)?;
-    verify_current_password(&conn, &current_password)?;
+    verify_credentials(&conn, &current_password, current_password2.as_ref())?;
     conn.execute("DELETE FROM security_questions WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -362,12 +506,19 @@ fn attempt_recovery_core(conn: &rusqlite::Connection, answers: &[RecoveryAnswer]
 
     // Auto-cura (Fase 2): a DEK também pode ser obtida por este caminho (sem nunca passar por
     // `unlock_vault`), então a migração precisa rodar aqui também.
-    crate::migration::migrate_plaintext_account_fields(conn, &dek)?;
+    crate::migration::migrate_all(conn, &dek)?;
 
     Ok(RecoveryAttemptResult {
         outcome: RecoveryOutcome { success: true, message: "Identidade confirmada.".to_string() },
         dek: Some(dek),
     })
+}
+
+/// Só para testes de outros módulos: tenta recuperar a DEK com `(id, resposta)` e devolve a DEK.
+#[cfg(test)]
+pub(crate) fn recover_with_answers_for_test(conn: &rusqlite::Connection, answers: &[(i64, &str)]) -> Option<[u8; 32]> {
+    let answers: Vec<RecoveryAnswer> = answers.iter().map(|(id, a)| RecoveryAnswer { id: *id, answer: Zeroizing::new(a.to_string()) }).collect();
+    attempt_recovery_core(conn, &answers).ok().and_then(|r| r.dek)
 }
 
 #[tauri::command]
@@ -379,9 +530,11 @@ pub fn attempt_vault_recovery(app: AppHandle, state: State<VaultState>, answers:
 /// Tentativa de recuperação + marcação da sessão como "aberta por recuperação" em caso de
 /// sucesso (único estado em que `reset_master_password_after_recovery` é aceito).
 fn attempt_recovery_into_state(conn: &rusqlite::Connection, state: &VaultState, answers: &[RecoveryAnswer]) -> Result<RecoveryOutcome, String> {
+    // Exclusividade ANTES de verificar respostas: não abre um segundo cofre com outro já aberto.
+    let reservation = state.reserve_exclusive()?;
     let result = attempt_recovery_core(conn, answers)?;
     if let Some(dek) = result.dek {
-        state.set_dek_from_recovery(dek);
+        state.commit(dek, crate::state::UnlockMethod::Recovery, reservation)?;
     }
     Ok(result.outcome)
 }
@@ -408,21 +561,15 @@ pub(crate) fn reset_master_password_core(
     }
     let dek = state.with_recovery_dek(|dek| *dek).ok_or_else(|| "Identidade ainda não confirmada.".to_string())?;
 
-    let new_salt = crypto::random_bytes(crypto::SALT_LEN);
-    let new_kek = crypto::derive_key(new_password, &new_salt, new_params).map_err(|_| generic_error())?;
-    let new_wrapped_dek = crypto::encrypt(&new_kek, &dek).map_err(|_| generic_error())?;
-    let new_params_json = serde_json::to_string(new_params).map_err(|e| e.to_string())?;
-
-    conn.execute(
-        "UPDATE vault_meta SET kdf_salt = ?1, kdf_params = ?2, wrapped_dek = ?3 WHERE id = 1",
-        rusqlite::params![new_salt, new_params_json, new_wrapped_dek],
-    )
-    .map_err(|e| e.to_string())?;
+    // Grava UMA senha nova e volta a política de desbloqueio para "uma senha": quem recuperou a DEK
+    // por um método de recuperação não tem (nem precisa ter) as senhas antigas, e manter a política
+    // de duas senhas sem elas deixaria o cofre sem como ser reaberto. O usuário pode reativá-la em
+    // Configurações. A DEK e os demais métodos de recuperação não são tocados.
+    crate::auth::reset_to_single(conn, &dek, new_password, new_params)?;
 
     // A sessão continua desbloqueada, mas deixa de ser "de recuperação": uma segunda troca de
     // senha agora exige `change_master_password` (com a senha atual).
-    state.set_dek(dek);
-    Ok(())
+    state.set_dek(dek)
 }
 
 pub fn compute_dek_check(dek: &[u8; 32]) -> Result<Vec<u8>, String> {
@@ -474,6 +621,25 @@ mod tests {
 
         conn.execute("INSERT OR IGNORE INTO recovery_attempts (id, failed_count, locked_until) VALUES (1, 0, NULL)", []).ok();
         (conn, dek, ids)
+    }
+
+    /// Insere uma pergunta direto no banco, como cofres criados por versões anteriores — é assim
+    /// que garantimos que quem já tem perguntas continua conseguindo recuperar o cofre.
+    fn insert_legacy_question(
+        conn: &rusqlite::Connection,
+        dek: &[u8; 32],
+        question: &str,
+        share_index: i64,
+        answer: &str,
+        params: &KdfParams,
+    ) -> Result<i64, String> {
+        let (salt, params_json, wrapped) = wrap_share(&share_for_index(dek, share_index)?, answer, params)?;
+        conn.execute(
+            "INSERT INTO security_questions (question, share_index, answer_salt, kdf_params, wrapped_share, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![question, share_index, salt, params_json, wrapped, db::now_iso()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
     }
 
     fn answer_of(ids: &[(i64, String)], index: usize, text: &str) -> RecoveryAnswer {
@@ -643,12 +809,6 @@ mod tests {
     }
 
     #[test]
-    fn adding_or_updating_security_questions_is_rejected_as_deprecated() {
-        assert_eq!(add_security_question().unwrap_err(), DEPRECATED_MESSAGE);
-        assert_eq!(update_security_question().unwrap_err(), DEPRECATED_MESSAGE);
-    }
-
-    #[test]
     fn share_index_out_of_range_returns_error_instead_of_panicking() {
         let dek = [1u8; 32];
         for bad in [0, -1, 256, 10_000, i64::MAX, i64::MIN] {
@@ -783,5 +943,340 @@ mod tests {
         assert_eq!(fresh.with_dek(|d| *d), Some(dek));
         let plaintext = fresh.with_dek(|d| crypto::decrypt_from_base64(d, &secret_ciphertext)).unwrap().unwrap();
         assert_eq!(plaintext, "SECURITY_TEST_SECRET_55123");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Reativação de criação/edição de perguntas (decisão do proprietário: recurso OPCIONAL)
+    // ---------------------------------------------------------------------------------------
+
+    fn pw(s: &str) -> Zeroizing<String> {
+        Zeroizing::new(s.to_string())
+    }
+
+    /// Cofre com senha mestra e NENHUMA pergunta, já desbloqueado — ponto de partida do fluxo
+    /// real "Configurações → adicionar pergunta" (add_question_core, não INSERT direto).
+    fn unlocked_vault_without_questions() -> (rusqlite::Connection, [u8; 32], VaultState) {
+        let (conn, dek, _) = fixture_with_master_password("senha-mestra", &[]);
+        let state = VaultState::new();
+        crate::commands::vault::unlock_vault_core(&conn, &state, &pw("senha-mestra")).unwrap();
+        (conn, dek, state)
+    }
+
+    fn add_q(conn: &rusqlite::Connection, state: &VaultState, n: usize) -> Result<(), String> {
+        add_question_core(conn, state, &pw("senha-mestra"), &format!("Pergunta {n}?"), &pw(&format!("resposta-unica-{n}")), &test_params())
+    }
+
+    fn question_ids(conn: &rusqlite::Connection) -> Vec<i64> {
+        let mut stmt = conn.prepare("SELECT id FROM security_questions ORDER BY id").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    }
+
+    fn answers_for(ids: &[i64], upto: usize) -> Vec<RecoveryAnswer> {
+        ids.iter()
+            .take(upto)
+            .enumerate()
+            .map(|(i, id)| RecoveryAnswer { id: *id, answer: pw(&format!("resposta-unica-{}", i + 1)) })
+            .collect()
+    }
+
+    #[test]
+    fn add_question_through_the_real_flow_then_recover_with_the_same_dek() {
+        let (conn, dek, state) = unlocked_vault_without_questions();
+        for n in 1..=3 {
+            add_q(&conn, &state, n).unwrap();
+        }
+        let ids = question_ids(&conn);
+        assert_eq!(ids.len(), 3);
+
+        // Cofre bloqueado (novo processo): só as respostas devem reconstruir a DEK real.
+        state.clear();
+        let fresh = VaultState::new();
+        let outcome = attempt_recovery_into_state(&conn, &fresh, &answers_for(&ids, 3)).unwrap();
+        assert!(outcome.success);
+        assert_eq!(fresh.with_dek(|d| *d), Some(dek));
+        assert_eq!(fresh.unlock_method(), Some(crate::state::UnlockMethod::Recovery));
+    }
+
+    #[test]
+    fn add_question_requires_unlocked_vault_and_correct_master_password_and_non_empty_fields() {
+        let (conn, _dek, state) = unlocked_vault_without_questions();
+
+        let wrong_pw = add_question_core(&conn, &state, &pw("errada"), "P?", &pw("r"), &test_params());
+        assert!(wrong_pw.is_err());
+
+        assert!(add_question_core(&conn, &state, &pw("senha-mestra"), "   ", &pw("r"), &test_params()).is_err());
+        assert!(add_question_core(&conn, &state, &pw("senha-mestra"), "P?", &pw("   "), &test_params()).is_err());
+        let huge = "x".repeat(MAX_ANSWER_CHARS + 1);
+        assert!(add_question_core(&conn, &state, &pw("senha-mestra"), "P?", &pw(&huge), &test_params()).is_err());
+        assert!(question_ids(&conn).is_empty(), "nenhuma tentativa inválida pode deixar linha parcial");
+
+        state.clear();
+        let locked = add_question_core(&conn, &state, &pw("senha-mestra"), "P?", &pw("r"), &test_params());
+        assert_eq!(locked.unwrap_err(), "O cofre está bloqueado.");
+        assert!(question_ids(&conn).is_empty());
+    }
+
+    // Quantidades: o formato é Shamir (limiar fixo = 3 shares). 1 ou 2 perguntas podem ser salvas
+    // (a escolha é do proprietário, a UI avisa), mas NÃO bastam para recuperar; de 3 a 20 sim.
+    #[test]
+    fn question_count_one_and_two_are_stored_but_cannot_recover_three_to_twenty_can() {
+        for count in [1usize, 2, 3, 4, 5, 20] {
+            let (conn, dek, state) = unlocked_vault_without_questions();
+            for n in 1..=count {
+                add_q(&conn, &state, n).unwrap();
+            }
+            let ids = question_ids(&conn);
+            assert_eq!(ids.len(), count);
+
+            // O fluxo de recuperação exibe no máximo 5 perguntas, e `validate_recovery_request`
+            // aceita no máximo 5 respostas.
+            let fresh = VaultState::new();
+            let outcome = attempt_recovery_into_state(&conn, &fresh, &answers_for(&ids, count.min(RECOVERY_QUESTIONS_SHOWN))).unwrap();
+            if count < RECOVERY_THRESHOLD as usize {
+                assert!(!outcome.success, "{count} pergunta(s) estão abaixo do limiar de {RECOVERY_THRESHOLD}");
+                assert!(!fresh.is_unlocked());
+            } else {
+                assert!(outcome.success, "{count} perguntas deveriam permitir recuperar");
+                assert_eq!(fresh.with_dek(|d| *d), Some(dek));
+            }
+        }
+    }
+
+    #[test]
+    fn twenty_first_question_is_rejected_and_share_indexes_stay_unique() {
+        let (conn, _dek, state) = unlocked_vault_without_questions();
+        for n in 1..=MAX_QUESTIONS as usize {
+            add_q(&conn, &state, n).unwrap();
+        }
+        assert!(add_q(&conn, &state, 21).is_err());
+        let distinct: i64 = conn.query_row("SELECT COUNT(DISTINCT share_index) FROM security_questions", [], |r| r.get(0)).unwrap();
+        assert_eq!(distinct, MAX_QUESTIONS);
+    }
+
+    // Remover e readicionar muitas vezes não pode esgotar os 255 índices nem gerar share repetida.
+    #[test]
+    fn add_delete_cycles_reuse_the_lowest_free_share_index() {
+        let (conn, dek, state) = unlocked_vault_without_questions();
+        for n in 1..=3 {
+            add_q(&conn, &state, n).unwrap();
+        }
+        for round in 0..260 {
+            let ids = question_ids(&conn);
+            conn.execute("DELETE FROM security_questions WHERE id = ?1", [ids[0]]).unwrap();
+            add_question_core(&conn, &state, &pw("senha-mestra"), "Pergunta nova?", &pw(&format!("nova-{round}")), &test_params()).unwrap();
+        }
+        let max_index: i64 = conn.query_row("SELECT MAX(share_index) FROM security_questions", [], |r| r.get(0)).unwrap();
+        assert!(max_index <= 3, "índices devem ser reaproveitados, max = {max_index}");
+
+        let ids = question_ids(&conn);
+        // As 3 linhas atuais foram criadas nas rodadas 257, 258 e 259 (respostas "nova-N");
+        // recuperar com elas prova que a DEK continua a mesma depois de 260 ciclos.
+        let current: Vec<RecoveryAnswer> =
+            ids.iter().enumerate().map(|(i, id)| RecoveryAnswer { id: *id, answer: pw(&format!("nova-{}", 257 + i)) }).collect();
+        let outcome = attempt_recovery_core(&conn, &current).unwrap();
+        assert!(outcome.outcome.success);
+        assert_eq!(outcome.dek, Some(dek));
+    }
+
+    #[test]
+    fn update_question_text_only_keeps_the_old_answers_working() {
+        let (conn, dek, state) = unlocked_vault_without_questions();
+        for n in 1..=3 {
+            add_q(&conn, &state, n).unwrap();
+        }
+        let ids = question_ids(&conn);
+        update_question_core(&conn, &state, &pw("senha-mestra"), ids[0], "  Texto novo?  ", None, &test_params()).unwrap();
+        let text: String = conn.query_row("SELECT question FROM security_questions WHERE id = ?1", [ids[0]], |r| r.get(0)).unwrap();
+        assert_eq!(text, "Texto novo?");
+
+        let result = attempt_recovery_core(&conn, &answers_for(&ids, 3)).unwrap();
+        assert!(result.outcome.success);
+        assert_eq!(result.dek, Some(dek));
+    }
+
+    #[test]
+    fn update_answer_invalidates_the_old_one_and_the_new_one_recovers() {
+        let (conn, dek, state) = unlocked_vault_without_questions();
+        for n in 1..=3 {
+            add_q(&conn, &state, n).unwrap();
+        }
+        let ids = question_ids(&conn);
+        update_question_core(&conn, &state, &pw("senha-mestra"), ids[1], "Outra?", Some(&pw("resposta-NOVA")), &test_params()).unwrap();
+
+        // Resposta antiga da pergunta 2 deixou de valer (só 2 shares válidas → abaixo do limiar).
+        assert!(!attempt_recovery_core(&conn, &answers_for(&ids, 3)).unwrap().outcome.success);
+
+        let mut answers = answers_for(&ids, 3);
+        answers[1].answer = pw("resposta-NOVA");
+        let result = attempt_recovery_core(&conn, &answers).unwrap();
+        assert!(result.outcome.success);
+        assert_eq!(result.dek, Some(dek));
+    }
+
+    #[test]
+    fn update_question_rejects_wrong_password_locked_vault_unknown_id_and_leaves_row_untouched() {
+        let (conn, _dek, state) = unlocked_vault_without_questions();
+        add_q(&conn, &state, 1).unwrap();
+        let id = question_ids(&conn)[0];
+        let before: (String, Vec<u8>) =
+            conn.query_row("SELECT question, wrapped_share FROM security_questions WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+
+        assert!(update_question_core(&conn, &state, &pw("errada"), id, "X?", Some(&pw("y")), &test_params()).is_err());
+        assert!(update_question_core(&conn, &state, &pw("senha-mestra"), 9999, "X?", Some(&pw("y")), &test_params()).is_err());
+        assert!(update_question_core(&conn, &state, &pw("senha-mestra"), 9999, "X?", None, &test_params()).is_err());
+        assert!(update_question_core(&conn, &state, &pw("senha-mestra"), id, "", None, &test_params()).is_err());
+        state.clear();
+        assert!(update_question_core(&conn, &state, &pw("senha-mestra"), id, "X?", None, &test_params()).is_err());
+
+        let after: (String, Vec<u8>) =
+            conn.query_row("SELECT question, wrapped_share FROM security_questions WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn no_questions_configured_recovery_fails_cleanly_and_normal_unlock_still_works() {
+        let (conn, _dek, _state) = unlocked_vault_without_questions();
+        let fresh = VaultState::new();
+        let outcome = attempt_recovery_into_state(&conn, &fresh, &[]).unwrap();
+        assert!(!outcome.success);
+        assert!(!fresh.is_unlocked());
+        crate::commands::vault::unlock_vault_core(&conn, &fresh, &pw("senha-mestra")).unwrap();
+        assert!(fresh.is_unlocked());
+        assert_eq!(fresh.unlock_method(), Some(crate::state::UnlockMethod::MasterPassword));
+    }
+
+    // Persistência real em disco: fecha a conexão, reabre o arquivo SQLite e recupera.
+    #[test]
+    fn questions_persist_across_closing_and_reopening_the_database_file() {
+        let path = std::env::temp_dir().join(format!("cofre-sq-test-{}.db", hex_suffix()));
+        let dek;
+        let ids;
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            db::init_schema(&conn).unwrap();
+            let (mem, mem_dek, _) = fixture_with_master_password("senha-mestra", &[]);
+            // Copia o vault_meta do fixture para o arquivo (mesma DEK/senha).
+            let (salt, params, wrapped, check): (Vec<u8>, String, Vec<u8>, Vec<u8>) = mem
+                .query_row("SELECT kdf_salt, kdf_params, wrapped_dek, dek_check FROM vault_meta WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO vault_meta (id, kdf_salt, kdf_params, wrapped_dek, dek_check, created_at) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![salt, params, wrapped, check, db::now_iso()],
+            )
+            .unwrap();
+            conn.execute("INSERT OR IGNORE INTO recovery_attempts (id, failed_count, locked_until) VALUES (1, 0, NULL)", []).ok();
+            dek = mem_dek;
+            let state = VaultState::new();
+            crate::commands::vault::unlock_vault_core(&conn, &state, &pw("senha-mestra")).unwrap();
+            for n in 1..=3 {
+                add_q(&conn, &state, n).unwrap();
+            }
+            ids = question_ids(&conn);
+        } // conexão fechada
+
+        let reopened = rusqlite::Connection::open(&path).unwrap();
+        let state = VaultState::new();
+        let outcome = attempt_recovery_into_state(&reopened, &state, &answers_for(&ids, 3)).unwrap();
+        assert!(outcome.success);
+        assert_eq!(state.with_dek(|d| *d), Some(dek));
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn hex_suffix() -> String {
+        crypto::random_bytes(6).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    // Nada sensível em claro em security_questions/vault_meta: nem as respostas, nem a DEK, nem a
+    // senha mestra. (O TEXTO da pergunta fica em claro por desenho — documentado em SECURITY.md.)
+    #[test]
+    fn answers_dek_and_master_password_never_appear_in_stored_rows() {
+        let (conn, dek, state) = unlocked_vault_without_questions();
+        add_question_core(&conn, &state, &pw("senha-mestra"), "Cor?", &pw("RESPOSTA-SECRETA-77231"), &test_params()).unwrap();
+
+        let mut haystack: Vec<u8> = Vec::new();
+        for sql in [
+            "SELECT answer_salt, kdf_params, wrapped_share FROM security_questions",
+            "SELECT kdf_salt, kdf_params, wrapped_dek, dek_check FROM vault_meta",
+        ] {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let cols = stmt.column_count();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                for i in 0..cols {
+                    match row.get_ref(i).unwrap() {
+                        rusqlite::types::ValueRef::Text(t) => haystack.extend_from_slice(t),
+                        rusqlite::types::ValueRef::Blob(b) => haystack.extend_from_slice(b),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let contains = |needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+        assert!(!contains(b"RESPOSTA-SECRETA-77231"));
+        assert!(!contains(b"resposta-secreta-77231"), "forma normalizada também não pode aparecer");
+        assert!(!contains(b"senha-mestra"));
+        assert!(!contains(&dek), "a DEK não pode estar gravada em claro");
+    }
+
+    // Dados corrompidos/forjados: nunca pânico, nunca desbloqueio, nunca estado alterado além do
+    // contador de tentativas.
+    #[test]
+    fn corrupted_question_rows_fail_cleanly_without_panic_or_unlock() {
+        let (conn, _dek, ids) = fixture_vault_with_questions(&["a", "b", "c"]);
+        conn.execute("UPDATE security_questions SET wrapped_share = X'00' WHERE id = ?1", [ids[0].0]).unwrap();
+        conn.execute("UPDATE security_questions SET kdf_params = 'não é json' WHERE id = ?1", [ids[1].0]).unwrap();
+        conn.execute(
+            "UPDATE security_questions SET kdf_params = '{\"memory_kib\":4294967295,\"iterations\":99999,\"parallelism\":1}' WHERE id = ?1",
+            [ids[2].0],
+        )
+        .unwrap();
+        let state = VaultState::new();
+        let started = std::time::Instant::now();
+        let outcome = attempt_recovery_into_state(&conn, &state, &correct_three(&ids)).unwrap();
+        assert!(!outcome.success);
+        assert!(!state.is_unlocked());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "KDF forjado não pode causar DoS");
+    }
+
+    #[test]
+    fn recovery_error_messages_never_echo_answers() {
+        let (conn, _dek, ids) = fixture_vault_with_questions(&["a", "b", "c"]);
+        let secret = "RESPOSTA-NO-LOG-99182";
+        let answers: Vec<RecoveryAnswer> = (0..3).map(|i| answer_of(&ids, i, secret)).collect();
+        let outcome = attempt_recovery_core(&conn, &answers).unwrap();
+        assert!(!outcome.outcome.message.contains(secret));
+    }
+
+    // Backup `.vaultbackup`: perguntas viajam no backup e continuam recuperando o cofre restaurado.
+    #[test]
+    fn questions_survive_backup_export_and_restore_and_still_recover() {
+        let (conn, dek, state) = unlocked_vault_without_questions();
+        for n in 1..=3 {
+            add_q(&conn, &state, n).unwrap();
+        }
+        let ids = question_ids(&conn);
+        let restored = crate::commands::backup::clone_via_backup_for_test(&conn, "senha-do-backup-123");
+        let result = attempt_recovery_core(&restored, &answers_for(&ids, 3)).unwrap();
+        assert!(result.outcome.success);
+        assert_eq!(result.dek, Some(dek));
+    }
+
+    // Recuperação autorizada → reset; reset sem recuperação continua proibido (já coberto acima
+    // para sessão normal e cofre bloqueado). Aqui: o reset funciona com perguntas criadas pelo fluxo novo.
+    #[test]
+    fn reset_after_questions_recovery_works_for_questions_created_by_the_new_flow() {
+        let (conn, dek, state) = unlocked_vault_without_questions();
+        for n in 1..=3 {
+            add_q(&conn, &state, n).unwrap();
+        }
+        let ids = question_ids(&conn);
+        let fresh = VaultState::new();
+        assert!(attempt_recovery_into_state(&conn, &fresh, &answers_for(&ids, 3)).unwrap().success);
+        reset_master_password_core(&conn, &fresh, &pw("nova-senha-mestra"), &test_params()).unwrap();
+        let again = VaultState::new();
+        crate::commands::vault::unlock_vault_core(&conn, &again, &pw("nova-senha-mestra")).unwrap();
+        assert_eq!(again.with_dek(|d| *d), Some(dek));
+        assert!(crate::commands::vault::unlock_vault_core(&conn, &VaultState::new(), &pw("senha-mestra")).is_err());
     }
 }

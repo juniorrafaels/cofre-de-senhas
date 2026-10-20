@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, Database, FolderKanban, Layers, Lock, Monitor, Moon, Palette, Shield, Sun, Tag as TagIcon, Wand2 } from "lucide-react";
 import { Button } from "../ui/Button";
@@ -13,6 +13,10 @@ import { TagsManagerSection } from "./TagsManagerSection";
 import { ListColumnsConfig } from "./ListColumnsConfig";
 import { PasswordGeneratorSection } from "./PasswordGeneratorSection";
 import { DeleteVaultSection } from "./DeleteVaultSection";
+import { UnlockPolicySection } from "./UnlockPolicySection";
+import { RecoveryPasswordSection } from "./RecoveryPasswordSection";
+import { SecondPasswordField, useDualUnlock } from "../security/SecondPasswordField";
+import { useSecurityStore } from "../../store/useSecurityStore";
 import { PlatformManagerModal } from "../platforms/PlatformManagerModal";
 import { ProjectManagerModal } from "../projects/ProjectManagerModal";
 import { PlatformIcon } from "../ui/PlatformIcon";
@@ -82,6 +86,9 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
 
   const [activeSection, setActiveSection] = useState<SettingsSection | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
+  const [currentPassword2, setCurrentPassword2] = useState("");
+  const dual = useDualUnlock();
+  const refreshGate = useSecurityStore((s) => s.refresh);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [changingPassword, setChangingPassword] = useState(false);
@@ -89,8 +96,14 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
   // Restaurar substitui o cofre inteiro (inclusive a senha mestra) — o Rust exige a senha mestra
   // ATUAL e a verifica antes de abrir o arquivo de backup.
   const [restoreMasterPassword, setRestoreMasterPassword] = useState("");
+  const [restoreMasterPassword2, setRestoreMasterPassword2] = useState("");
   const [platformManagerOpen, setPlatformManagerOpen] = useState(false);
   const [projectManagerOpen, setProjectManagerOpen] = useState(false);
+
+  // Os formulários de reautenticação mostram o campo da segunda senha conforme a política atual.
+  useEffect(() => {
+    refreshGate();
+  }, [refreshGate, activeSection]);
 
   async function handleChangePassword(e: FormEvent) {
     e.preventDefault();
@@ -100,9 +113,10 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
     }
     setChangingPassword(true);
     try {
-      await vaultCommands.changeMasterPassword(currentPassword, newPassword);
+      await vaultCommands.changeMasterPassword(currentPassword, newPassword, dual ? currentPassword2 : undefined);
       push(t("settings.security.changedSuccessToast"), "success");
       setCurrentPassword("");
+      setCurrentPassword2("");
       setNewPassword("");
       setConfirmPassword("");
     } catch (err) {
@@ -136,7 +150,7 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
       push(t("settings.data.importShortPasswordError"), "error");
       return;
     }
-    if (!restoreMasterPassword) {
+    if (!restoreMasterPassword || (dual && !restoreMasterPassword2)) {
       push(t("settings.data.importMasterPasswordRequired"), "error");
       return;
     }
@@ -147,8 +161,9 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
     });
     if (!path || Array.isArray(path)) return;
     try {
-      await backupCommands.import(path, backupPassword, restoreMasterPassword);
+      await backupCommands.import(path, backupPassword, restoreMasterPassword, dual ? restoreMasterPassword2 : undefined);
       setRestoreMasterPassword("");
+      setRestoreMasterPassword2("");
       push(t("settings.data.importedSuccessToast"), "success");
       await lock();
     } catch (err) {
@@ -249,6 +264,7 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
               <Label>{t("settings.security.currentPasswordLabel")}</Label>
               <Input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
             </div>
+            <SecondPasswordField value={currentPassword2} onChange={setCurrentPassword2} disabled={changingPassword} />
             <div>
               <Label>{t("settings.security.newPasswordLabel")}</Label>
               <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
@@ -257,13 +273,15 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
               <Label>{t("settings.security.confirmPasswordLabel")}</Label>
               <Input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
             </div>
-            <Button type="submit" variant="primary" disabled={changingPassword || !currentPassword || !newPassword}>
+            <Button type="submit" variant="primary" disabled={changingPassword || !currentPassword || (dual && !currentPassword2) || !newPassword}>
               {changingPassword ? t("settings.security.changing") : t("settings.security.changeButton")}
             </Button>
           </form>
 
+          <UnlockPolicySection />
           <RecoveryKeySection />
           <SecurityQuestionsSection />
+          <RecoveryPasswordSection />
         </SectionCard>
       )}
 
@@ -359,6 +377,19 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
           <div className="border-t border-[var(--color-border)] pt-4">
             <p className="mb-2 text-sm font-medium">{t("settings.appearance.listViewLabel")}</p>
             <ListColumnsConfig />
+            <p className="mt-2 text-xs text-[var(--color-text-muted)]">{t("settings.display.lastLoginColumnHint")}</p>
+          </div>
+
+          <div className="border-t border-[var(--color-border)] pt-4">
+            <Row label={t("settings.display.updatedBadgeLabel")} description={t("settings.display.updatedBadgeDescription")}>
+              <input
+                type="checkbox"
+                aria-label={t("settings.display.updatedBadgeLabel")}
+                checked={settings.showUpdatedBadge}
+                onChange={(e) => settings.setShowUpdatedBadge(e.target.checked)}
+                className="h-4 w-4"
+              />
+            </Row>
           </div>
 
           <p className="border-t border-[var(--color-border)] pt-4 text-xs text-[var(--color-text-muted)]">{t("settings.appearance.scaleHint")}</p>
@@ -387,6 +418,7 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
               autoComplete="current-password"
             />
           </div>
+          <SecondPasswordField value={restoreMasterPassword2} onChange={setRestoreMasterPassword2} />
           <div className="flex gap-2">
             <Button variant="secondary" onClick={handleExportBackup} className="flex-1">
               {t("settings.data.exportButton")}

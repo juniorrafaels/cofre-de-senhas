@@ -39,8 +39,18 @@ pub fn recovery_key_status(app: AppHandle) -> Result<RecoveryKeyStatus, String> 
 /// permitir testar a reautenticação (senha mestra atual errada/certa) e o wrap/unwrap real da
 /// Recovery Key sem precisar de um `AppHandle`/`State` reais (mesmo padrão de
 /// `security_questions::attempt_recovery_core`).
+#[cfg(test)]
 fn generate_recovery_key_core(conn: &rusqlite::Connection, current_password: &Zeroizing<String>, dek: [u8; 32]) -> Result<String, String> {
-    crate::commands::vault::verify_current_password(conn, current_password)?;
+    generate_recovery_key_with(conn, current_password, None, dek)
+}
+
+fn generate_recovery_key_with(
+    conn: &rusqlite::Connection,
+    current_password: &Zeroizing<String>,
+    current_password2: Option<&Zeroizing<String>>,
+    dek: [u8; 32],
+) -> Result<String, String> {
+    crate::commands::vault::verify_credentials(conn, current_password, current_password2)?;
 
     let recovery_key = crypto::generate_recovery_key();
     let normalized = Zeroizing::new(crypto::normalize_recovery_key(&recovery_key));
@@ -61,6 +71,18 @@ fn generate_recovery_key_core(conn: &rusqlite::Connection, current_password: &Ze
     Ok(recovery_key)
 }
 
+/// Só para testes de outros módulos: gera a Recovery Key reautenticando a senha mestra dada.
+#[cfg(test)]
+pub(crate) fn generate_recovery_key_core_for_test(conn: &rusqlite::Connection, master_password: &str, dek: [u8; 32]) -> String {
+    generate_recovery_key_core(conn, &Zeroizing::new(master_password.to_string()), dek).unwrap()
+}
+
+/// Só para testes de outros módulos: desbloqueia pela Recovery Key e devolve a DEK.
+#[cfg(test)]
+pub(crate) fn unlock_with_recovery_key_for_test(conn: &rusqlite::Connection, recovery_key: &str) -> Result<[u8; 32], String> {
+    unlock_with_recovery_key_core(conn, &Zeroizing::new(recovery_key.to_string()))
+}
+
 /// Gera uma nova Recovery Key e a torna um segundo caminho independente para desembrulhar a
 /// mesma DEK (ver `crypto::generate_recovery_key` — 120 bits de entropia, sem depender de
 /// nenhuma informação sobre o usuário). Regenerar invalida qualquer chave anterior. A chave em
@@ -71,23 +93,35 @@ fn generate_recovery_key_core(conn: &rusqlite::Connection, current_password: &Ze
 /// a Recovery Key é uma operação crítica o bastante (ela sozinha desembrulha a DEK) para não
 /// depender só de `state.is_unlocked()`.
 #[tauri::command]
-pub fn generate_recovery_key(app: AppHandle, state: State<VaultState>, current_password: String) -> Result<String, String> {
+pub fn generate_recovery_key(
+    app: AppHandle,
+    state: State<VaultState>,
+    current_password: String,
+    current_password2: Option<String>,
+) -> Result<String, String> {
     let current_password = Zeroizing::new(current_password);
+    let current_password2 = crate::commands::vault::opt_secret(current_password2);
     let dek = state.with_dek(|dek| *dek).ok_or_else(|| "O cofre está bloqueado.".to_string())?;
     let conn = db::open(&app)?;
-    generate_recovery_key_core(&conn, &current_password, dek)
+    generate_recovery_key_with(&conn, &current_password, current_password2.as_ref(), dek)
 }
 
 /// Fase 4: também exige reautenticação por senha mestra (ver `generate_recovery_key`) — desativar
 /// a Recovery Key destrói um mecanismo de recuperação, não é uma ação reversível de UI comum.
 #[tauri::command]
-pub fn disable_recovery_key(app: AppHandle, state: State<VaultState>, current_password: String) -> Result<(), String> {
+pub fn disable_recovery_key(
+    app: AppHandle,
+    state: State<VaultState>,
+    current_password: String,
+    current_password2: Option<String>,
+) -> Result<(), String> {
     let current_password = Zeroizing::new(current_password);
+    let current_password2 = crate::commands::vault::opt_secret(current_password2);
     if !state.is_unlocked() {
         return Err("O cofre está bloqueado.".to_string());
     }
     let conn = db::open(&app)?;
-    crate::commands::vault::verify_current_password(&conn, &current_password)?;
+    crate::commands::vault::verify_credentials(&conn, &current_password, current_password2.as_ref())?;
     conn.execute(
         "UPDATE vault_meta SET recovery_key_salt = NULL, recovery_key_kdf_params = NULL, recovery_key_wrapped_dek = NULL, recovery_key_check = NULL, recovery_key_created_at = NULL WHERE id = 1",
         [],
@@ -125,7 +159,7 @@ fn unlock_with_recovery_key_core(conn: &rusqlite::Connection, recovery_key: &Zer
     dek.copy_from_slice(&dek_bytes);
 
     // Auto-cura (Fase 2): este também é um caminho independente para obter a DEK.
-    crate::migration::migrate_plaintext_account_fields(conn, &dek)?;
+    crate::migration::migrate_all(conn, &dek)?;
 
     Ok(dek)
 }
@@ -147,9 +181,11 @@ pub(crate) fn unlock_with_recovery_key_into_state(
     state: &VaultState,
     recovery_key: &Zeroizing<String>,
 ) -> Result<(), String> {
+    // Exclusividade ANTES de derivar/abrir qualquer coisa: a Recovery Key também é um desbloqueio,
+    // então não pode abrir um segundo cofre enquanto outra instância mantém um aberto.
+    let reservation = state.reserve_exclusive()?;
     let dek = unlock_with_recovery_key_core(conn, recovery_key)?;
-    state.set_dek_from_recovery(dek);
-    Ok(())
+    state.commit(dek, crate::state::UnlockMethod::Recovery, reservation)
 }
 
 #[cfg(test)]

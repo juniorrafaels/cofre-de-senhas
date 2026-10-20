@@ -30,15 +30,39 @@ duas opções:
 1. Na página do projeto no GitHub, clique em **Releases** (coluna da direita) e abra a versão mais
    recente.
 2. Em **Assets**, baixe o arquivo que termina em **`_x64-setup.exe`**, por exemplo
-   `Cofre.de.Contas_0.1.0_x64-setup.exe`.
-   - Existe também um `.msi`, que instala para **todos os usuários** do computador e pede senha de
-     administrador. Para uso pessoal, prefira o `-setup.exe`.
-3. **Confira se o arquivo é autêntico** (recomendado num gerenciador de senhas). Na mesma página da
-   release há um hash SHA-256. No PowerShell, na pasta Downloads, rode:
+   `Cofre-de-Contas_0.1.0_x64-setup.exe`, e o **`SHA256SUMS.txt`**.
+   - Existe também um `.msi` (`Cofre-de-Contas_0.1.0_x64_en-US.msi`), que instala para **todos os
+     usuários** do computador e pede senha de administrador. Para uso pessoal, prefira o
+     `-setup.exe`.
+   - **Versões beta:** o nome do `-setup.exe` leva a versão completa
+     (`Cofre-de-Contas_0.1.0-beta.2_x64-setup.exe`) e o `.msi` leva a forma numérica do Windows
+     Installer (`Cofre-de-Contas_0.1.0.2_x64_en-US.msi`, o `.2` é o número do beta).
+   - A `v0.1.0-beta.1` é uma exceção: foi publicada antes da automação, como um ZIP
+     (`instaladores-<commit>.zip`) que contém os instaladores com o nome gerado pelo Tauri
+     (`Cofre de Contas_0.1.0_x64-setup.exe`, com espaços). A partir da próxima versão os arquivos
+     ficam soltos na release, com os nomes acima.
+3. **Confira se o arquivo é autêntico** (recomendado num gerenciador de senhas). Os nomes no
+   `SHA256SUMS.txt` são exatamente os nomes dos arquivos da release. No PowerShell, na pasta
+   Downloads, rode:
    ```powershell
-   Get-FileHash .\Cofre.de.Contas_0.1.0_x64-setup.exe -Algorithm SHA256
+   Get-FileHash .\Cofre-de-Contas_0.1.0_x64-setup.exe -Algorithm SHA256
+   Get-Content .\SHA256SUMS.txt
    ```
-   O código mostrado precisa ser **igual** ao publicado. Se for diferente, **não instale**.
+   O código mostrado precisa ser **igual** ao da linha desse arquivo no `SHA256SUMS.txt` (ou ao
+   hash escrito nas notas da release). Se for diferente, **não instale**. Em Linux/macOS:
+   `sha256sum -c SHA256SUMS.txt` na pasta com os arquivos.
+   - O hash confere a **integridade**: o arquivo que você baixou é idêntico ao que gerou aquele
+     hash. Mas **sozinho não prova quem o publicou**: quem consegue trocar o instalador também
+     consegue trocar o texto ao lado dele.
+   - Releases geradas pelo workflow `Release` trazem também uma **attestation de proveniência**
+     do GitHub: evidência de que o arquivo foi compilado neste repositório, a partir de um commit
+     específico. Para conferir (precisa do [GitHub CLI](https://cli.github.com/)):
+     ```powershell
+     gh attestation verify .\Cofre-de-Contas_0.1.0_x64-setup.exe --repo juniorrafaels/cofre-de-senhas
+     ```
+     A `v0.1.0-beta.1` foi publicada antes desse workflow e **não tem attestation**.
+   - Nada disso substitui uma **assinatura digital** do instalador, que ainda não existe, nem uma
+     auditoria de segurança independente.
 4. Dê dois cliques no instalador.
    - O instalador ainda **não é assinado digitalmente**, então o Windows pode mostrar
      **"O Windows protegeu o computador"**. Se o hash conferiu, clique em **Mais informações →

@@ -1,25 +1,13 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import clsx from "clsx";
 import { Button } from "../ui/Button";
 import { Input, Label } from "../ui/Input";
 import { useVaultStore } from "../../store/useVaultStore";
 import { useSettingsStore } from "../../store/useSettingsStore";
+import { PasswordStrengthMeter } from "../ui/PasswordStrengthMeter";
 import { useTranslation } from "../../i18n";
 import { SUPPORTED_LOCALES, type Locale } from "../../types";
-
-function passwordStrength(t: (key: string) => string, password: string): { label: string; color: string; score: number } {
-  let score = 0;
-  if (password.length >= 8) score++;
-  if (password.length >= 12) score++;
-  if (/[A-Z]/.test(password) && /[a-z]/.test(password)) score++;
-  if (/\d/.test(password)) score++;
-  if (/[^A-Za-z0-9]/.test(password)) score++;
-
-  if (score <= 1) return { label: t("onboarding.strengthWeak"), color: "bg-[var(--color-danger)]", score };
-  if (score <= 3) return { label: t("onboarding.strengthFair"), color: "bg-amber-500", score };
-  return { label: t("onboarding.strengthStrong"), color: "bg-[var(--color-success)]", score };
-}
 
 const LANGUAGE_LABEL_KEYS: Record<Locale, string> = {
   "pt-BR": "settings.appearance.languagePortuguese",
@@ -35,8 +23,6 @@ export function CreateMasterPassword() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-
-  const strength = useMemo(() => passwordStrength(t, password), [t, password]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -100,17 +86,8 @@ export function CreateMasterPassword() {
           <div>
             <Label>{t("onboarding.masterPasswordLabel")}</Label>
             <Input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
-            {password.length > 0 && (
-              <div className="mt-1.5 flex items-center gap-2">
-                <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--color-border)]">
-                  <div
-                    className={`h-full ${strength.color} transition-all`}
-                    style={{ width: `${(strength.score / 5) * 100}%` }}
-                  />
-                </div>
-                <span className="text-xs text-[var(--color-text-muted)]">{strength.label}</span>
-              </div>
-            )}
+            {/* Avaliador compartilhado (src/lib/passwordStrength.ts), agrupado nos mesmos 3 níveis de antes. */}
+            <PasswordStrengthMeter password={password} granularity="three" />
           </div>
           <div>
             <Label>{t("onboarding.confirmPasswordLabel")}</Label>

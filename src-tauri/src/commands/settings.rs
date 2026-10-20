@@ -13,7 +13,7 @@ const LANGUAGE_VALUES: &[&str] = &["pt-BR", "en", "es"];
 const BOOL_VALUES: &[&str] = &["true", "false"];
 const VIEW_MODE_VALUES: &[&str] = &["grid", "list"];
 const LIST_COLUMN_KEYS: &[&str] =
-    &["avatar", "name", "platform", "username", "email", "project", "status", "tags", "updated_at", "two_factor"];
+    &["avatar", "name", "platform", "username", "email", "project", "status", "tags", "updated_at", "two_factor", "last_login"];
 // Níveis discretos do controle de escala das listagens/cards (seção 4 do pedido de ajuste) —
 // nunca zoom livre, para não permitir um valor que quebre o layout.
 const LIST_SCALE_VALUES: &[&str] = &["75", "90", "100", "110", "125", "150", "175", "200"];
@@ -45,7 +45,9 @@ fn validate_setting(key: &str, value: &str) -> Result<(), String> {
                 return Err("Idioma inválido.".to_string());
             }
         }
-        "lock_on_minimize" | "clipboard_clear_enabled" => {
+        // `show_updated_badge`: exibe/oculta o selo "Atualizada" (preferência de exibição — nunca altera
+        // `update_confirmed_at`). A coluna "Último login" é controlada por `list_columns` ("last_login").
+        "lock_on_minimize" | "clipboard_clear_enabled" | "show_updated_badge" => {
             if !BOOL_VALUES.contains(&value) {
                 return Err("Valor booleano inválido.".to_string());
             }
@@ -136,6 +138,24 @@ mod tests {
     fn rejects_unknown_list_columns() {
         assert!(validate_setting("list_columns", r#"["name","evil_column"]"#).is_err());
         assert!(validate_setting("list_columns", r#"["name","status"]"#).is_ok());
+    }
+
+    #[test]
+    fn last_login_column_and_updated_badge_are_independent_display_settings() {
+        assert!(validate_setting("list_columns", r#"["name","last_login"]"#).is_ok());
+        assert!(validate_setting("list_columns", r#"["name"]"#).is_ok(), "ocultar a coluna é só tirá-la da lista");
+        assert!(validate_setting("show_updated_badge", "true").is_ok());
+        assert!(validate_setting("show_updated_badge", "false").is_ok());
+        assert!(validate_setting("show_updated_badge", "talvez").is_err());
+    }
+
+    #[test]
+    fn security_policies_are_not_writable_through_the_generic_settings_command() {
+        // Política de duas senhas e bloqueio progressivo vivem no backend (com reautenticação); a
+        // WebView não pode "ligar/desligar" via set_setting.
+        for key in ["unlock_policy", "dual_unlock", "throttle_enabled", "unlock_throttle", "recovery_password"] {
+            assert!(validate_setting(key, "true").is_err(), "{key}");
+        }
     }
 
     #[test]

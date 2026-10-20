@@ -1,7 +1,9 @@
+use crate::auth;
 use crate::commands::security_questions;
 use crate::crypto::{self, KdfParams};
 use crate::db;
-use crate::state::VaultState;
+use crate::lockout::{Clock, SystemClock};
+use crate::state::{UnlockMethod, VaultState};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use zeroize::Zeroizing;
@@ -12,34 +14,30 @@ pub struct VaultStatus {
     pub unlocked: bool,
 }
 
-fn generic_error() -> String {
-    "Senha incorreta.".to_string()
+/// Confere uma senha candidata contra o `wrapped_dek` gravado no banco, decifrando-o de verdade
+/// (não é uma comparação de flag) — usado por qualquer operação crítica que precise reautenticar
+/// a senha mestra dentro do próprio comando (Recovery Key, perguntas de segurança — ver
+/// SECURITY_AUDIT_PHASE_4.md). Equivale a `verify_credentials(conn, password, None)`: num cofre com
+/// desbloqueio de duas senhas ela FALHA com `E_SECOND_PASSWORD_REQUIRED` (uma senha só nunca basta).
+#[cfg(test)]
+pub fn verify_current_password(conn: &rusqlite::Connection, password: &Zeroizing<String>) -> Result<[u8; 32], String> {
+    verify_credentials(conn, password, None)
 }
 
-/// Confere uma senha candidata contra o `wrapped_dek` gravado no banco, decifrando-o de verdade
-/// (não é uma comparação de flag) — mesma lógica que já existia embutida em
-/// `change_master_password`, extraída aqui para ser reaproveitada por qualquer operação crítica
-/// que precise reautenticar a senha mestra dentro do próprio comando (Recovery Key, perguntas de
-/// segurança — ver SECURITY_AUDIT_PHASE_4.md). Retorna a DEK só para confirmar que a senha
-/// realmente desembrulha o segredo certo; o chamador normalmente já tem a DEK via `state`.
-pub fn verify_current_password(conn: &rusqlite::Connection, password: &Zeroizing<String>) -> Result<[u8; 32], String> {
-    let (salt, params_json, wrapped_dek): (Vec<u8>, String, Vec<u8>) = conn
-        .query_row(
-            "SELECT kdf_salt, kdf_params, wrapped_dek FROM vault_meta WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|_| "O cofre ainda não foi criado.".to_string())?;
+/// Reautentica as credenciais atuais (uma ou duas senhas, conforme a política do cofre) aplicando
+/// o bloqueio progressivo, quando ativado. Retorna a DEK só para confirmar que as credenciais
+/// realmente desembrulham o segredo certo.
+pub fn verify_credentials(
+    conn: &rusqlite::Connection,
+    password: &Zeroizing<String>,
+    password2: Option<&Zeroizing<String>>,
+) -> Result<[u8; 32], String> {
+    auth::authenticate(conn, password, password2.map(|p| p.as_str()), &SystemClock).map_err(|e| e.to_ipc())
+}
 
-    let params: KdfParams = serde_json::from_str(&params_json).map_err(|_| generic_error())?;
-    let kek = crypto::derive_key(password, &salt, &params).map_err(|_| generic_error())?;
-    let dek_bytes = crypto::decrypt(&kek, &wrapped_dek).map_err(|_| generic_error())?;
-    if dek_bytes.len() != 32 {
-        return Err(generic_error());
-    }
-    let mut dek = [0u8; 32];
-    dek.copy_from_slice(&dek_bytes);
-    Ok(dek)
+/// Converte o segundo campo de senha vindo da WebView: vazio = ausente.
+pub fn opt_secret(value: Option<String>) -> Option<Zeroizing<String>> {
+    value.filter(|v| !v.is_empty()).map(Zeroizing::new)
 }
 
 #[tauri::command]
@@ -80,13 +78,14 @@ pub fn create_vault(app: AppHandle, state: State<VaultState>, password: String) 
         return Err("O cofre já foi criado.".to_string());
     }
 
+    let reservation = state.reserve_exclusive()?;
     let params = KdfParams::default();
     let salt = crypto::random_bytes(crypto::SALT_LEN);
-    let kek = crypto::derive_key(&password, &salt, &params).map_err(|_| generic_error())?;
+    let kek = crypto::derive_key(&password, &salt, &params).map_err(|_| auth::MSG_GENERIC.to_string())?;
 
     let mut dek = [0u8; 32];
     dek.copy_from_slice(&crypto::random_bytes(32));
-    let wrapped_dek = crypto::encrypt(&kek, &dek).map_err(|_| generic_error())?;
+    let wrapped_dek = crypto::encrypt(&kek, &dek).map_err(|_| auth::MSG_GENERIC.to_string())?;
 
     let params_json = serde_json::to_string(&params).map_err(|e| e.to_string())?;
     let dek_check = security_questions::compute_dek_check(&dek)?;
@@ -96,23 +95,38 @@ pub fn create_vault(app: AppHandle, state: State<VaultState>, password: String) 
     )
     .map_err(|e| e.to_string())?;
 
-    state.set_dek(dek);
-    Ok(())
+    state.commit(dek, UnlockMethod::MasterPassword, reservation)
 }
 
 #[tauri::command]
-pub fn unlock_vault(app: AppHandle, state: State<VaultState>, password: String) -> Result<(), String> {
+pub fn unlock_vault(app: AppHandle, state: State<VaultState>, password: String, password2: Option<String>) -> Result<(), String> {
     let password = Zeroizing::new(password);
+    let password2 = opt_secret(password2);
     let conn = db::open(&app)?;
-    unlock_vault_core(&conn, &state, &password)
+    unlock_vault_with(&conn, &state, &password, password2.as_ref(), &SystemClock)
 }
 
 /// Lógica de `unlock_vault` sobre uma `Connection`/`VaultState` quaisquer (testável sem
 /// `AppHandle`). Desbloqueio normal: `state.set_dek` sempre zera o flag de "sessão de
 /// recuperação" (ver `state::UnlockMethod`).
+#[cfg(test)]
 pub(crate) fn unlock_vault_core(conn: &rusqlite::Connection, state: &VaultState, password: &Zeroizing<String>) -> Result<(), String> {
-    // Mesma verificação real (decifra `wrapped_dek`) e mesmas mensagens de erro de antes.
-    let dek = verify_current_password(conn, password)?;
+    unlock_vault_with(conn, state, password, None, &SystemClock)
+}
+
+/// Desbloqueio completo: (1) reserva a exclusividade de cofre aberto ANTES de tocar em credenciais
+/// (outra instância já com o cofre aberto => `E_VAULT_OPEN_ELSEWHERE`, sem gastar tentativas);
+/// (2) autentica uma ou duas senhas conforme a política, com bloqueio progressivo; (3) migra
+/// campos legados; (4) só então abre a sessão.
+pub(crate) fn unlock_vault_with(
+    conn: &rusqlite::Connection,
+    state: &VaultState,
+    password: &Zeroizing<String>,
+    password2: Option<&Zeroizing<String>>,
+    clock: &dyn Clock,
+) -> Result<(), String> {
+    let reservation = state.reserve_exclusive()?;
+    let dek = auth::authenticate(conn, password, password2.map(|p| p.as_str()), clock).map_err(|e| e.to_ipc())?;
 
     let has_check: Option<Vec<u8>> = conn
         .query_row("SELECT dek_check FROM vault_meta WHERE id = 1", [], |row| row.get(0))
@@ -126,10 +140,9 @@ pub(crate) fn unlock_vault_core(conn: &rusqlite::Connection, state: &VaultState,
     // Auto-cura (Fase 2): re-cifra qualquer campo de conta que ainda esteja em texto puro de
     // versões anteriores (ex.: notes antes desta correção). Idempotente e barato depois da
     // primeira execução — ver `migration.rs`.
-    crate::migration::migrate_plaintext_account_fields(conn, &dek)?;
+    crate::migration::migrate_all(conn, &dek)?;
 
-    state.set_dek(dek);
-    Ok(())
+    state.commit(dek, UnlockMethod::MasterPassword, reservation)
 }
 
 #[tauri::command]
@@ -144,29 +157,42 @@ pub fn change_master_password(
     state: State<VaultState>,
     current_password: String,
     new_password: String,
+    current_password2: Option<String>,
 ) -> Result<(), String> {
     let current_password = Zeroizing::new(current_password);
+    let current_password2 = opt_secret(current_password2);
     let new_password = Zeroizing::new(new_password);
     if new_password.len() < 8 {
         return Err("A nova senha mestra deve ter pelo menos 8 caracteres.".to_string());
     }
+    if new_password.chars().count() > auth::MAX_PASSWORD_CHARS {
+        return Err(auth::MSG_PASSWORD_TOO_LONG.to_string());
+    }
     let conn = db::open(&app)?;
-    let dek = verify_current_password(&conn, &current_password)?;
+    change_master_password_core(&conn, &state, &current_password, current_password2.as_ref(), &new_password, &KdfParams::default(), &SystemClock)
+}
 
-    let new_salt = crypto::random_bytes(crypto::SALT_LEN);
-    let new_params = KdfParams::default();
-    let new_kek = crypto::derive_key(&new_password, &new_salt, &new_params).map_err(|_| generic_error())?;
-    let new_wrapped_dek = crypto::encrypt(&new_kek, &dek).map_err(|_| generic_error())?;
-    let new_params_json = serde_json::to_string(&new_params).map_err(|e| e.to_string())?;
-
-    conn.execute(
-        "UPDATE vault_meta SET kdf_salt = ?1, kdf_params = ?2, wrapped_dek = ?3 WHERE id = 1",
-        rusqlite::params![new_salt, new_params_json, new_wrapped_dek],
-    )
-    .map_err(|e| e.to_string())?;
-
-    state.set_dek(dek);
-    Ok(())
+/// Troca a senha mestra (senha 1) preservando a DEK, a política de desbloqueio (e a senha 2, se
+/// houver) e todos os métodos de recuperação, que embrulham a mesma DEK em envelopes independentes.
+pub(crate) fn change_master_password_core(
+    conn: &rusqlite::Connection,
+    state: &VaultState,
+    current_password: &Zeroizing<String>,
+    current_password2: Option<&Zeroizing<String>>,
+    new_password: &Zeroizing<String>,
+    params: &KdfParams,
+    clock: &dyn Clock,
+) -> Result<(), String> {
+    let reservation = state.reserve_exclusive()?;
+    let dek = auth::change_first(
+        conn,
+        current_password,
+        current_password2.map(|p| p.as_str()),
+        new_password,
+        params,
+        clock,
+    )?;
+    state.commit(dek, UnlockMethod::MasterPassword, reservation)
 }
 
 /// Confirma a senha mestra atual sem alterar nada — usado pela Etapa 1 da exclusão do cofre
@@ -174,10 +200,11 @@ pub fn change_master_password(
 /// `wrapped_dek`) usada por `change_master_password`/Recovery Key/perguntas de segurança — nunca
 /// uma comparação de flag decidida no frontend.
 #[tauri::command]
-pub fn verify_master_password(app: AppHandle, password: String) -> Result<(), String> {
+pub fn verify_master_password(app: AppHandle, password: String, password2: Option<String>) -> Result<(), String> {
     let password = Zeroizing::new(password);
+    let password2 = opt_secret(password2);
     let conn = db::open(&app)?;
-    verify_current_password(&conn, &password)?;
+    verify_credentials(&conn, &password, password2.as_ref())?;
     Ok(())
 }
 
@@ -202,6 +229,7 @@ fn wipe_all_tables(conn: &rusqlite::Connection) -> Result<(), String> {
          DELETE FROM platform_seed_state;
          DELETE FROM platforms;
          DELETE FROM settings;
+         DELETE FROM auth_throttle;
          DELETE FROM vault_meta;",
     )
     .map_err(|e| e.to_string())
@@ -217,11 +245,16 @@ fn wipe_all_tables(conn: &rusqlite::Connection) -> Result<(), String> {
 /// nova. A UI já exige duas confirmações independentes (senha mestra + digitar "EXCLUIR") antes
 /// de chamar este comando.
 #[tauri::command]
-pub fn delete_vault(app: AppHandle, state: State<VaultState>, password: String) -> Result<(), String> {
+pub fn delete_vault(app: AppHandle, state: State<VaultState>, password: String, password2: Option<String>) -> Result<(), String> {
     let password = Zeroizing::new(password);
+    let password2 = opt_secret(password2);
     let conn = db::open(&app)?;
-    verify_current_password(&conn, &password)?;
+    verify_credentials(&conn, &password, password2.as_ref())?;
     wipe_all_tables(&conn)?;
+    // Backups cifrados da migração de metadados (contêm o cofre antigo): saem junto com o cofre.
+    if let Some(db_path) = crate::migration::connection_db_path(&conn) {
+        crate::migration::remove_premigration_backups(&db_path);
+    }
     drop(conn);
 
     if let Ok(dir) = app.path().app_data_dir() {

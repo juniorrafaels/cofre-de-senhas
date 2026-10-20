@@ -3,6 +3,8 @@
 // conhecidos e diretamente exibidos ao usuário são traduzidos no frontend por correspondência
 // exata da string; qualquer mensagem não mapeada (erros genéricos do SQLite, do sistema de
 // arquivos etc.) passa direto, sem tradução — são técnicas por natureza.
+import { formatWait } from "../lib/duration";
+
 const RAW_TO_KEY: Record<string, string> = {
   "O cofre está bloqueado.": "vaultLocked",
   "Senha incorreta.": "wrongPassword",
@@ -17,6 +19,8 @@ const RAW_TO_KEY: Record<string, string> = {
   "A resposta não pode ficar vazia.": "securityAnswerEmpty",
   "Você atingiu o limite de 20 perguntas de segurança.": "securityQuestionLimit",
   "Pergunta não encontrada.": "securityQuestionNotFound",
+  "A pergunta é longa demais.": "securityQuestionTooLong",
+  "A resposta é longa demais.": "securityAnswerTooLong",
   "Respostas insuficientes ou incorretas. Verifique e tente novamente.": "recoveryAnswersIncorrect",
   "Identidade confirmada.": "identityConfirmed",
   "Identidade ainda não confirmada.": "identityNotConfirmed",
@@ -35,7 +39,6 @@ const RAW_TO_KEY: Record<string, string> = {
   "Desbloqueie o cofre antes de exportar um backup.": "unlockBeforeExport",
   "A senha do backup deve ter pelo menos 8 caracteres.": "backupPasswordTooShort",
   "Não foi possível ler o arquivo de backup.": "backupReadFailed",
-  "As perguntas de segurança foram descontinuadas por motivos de segurança. Gere uma Recovery Key.": "securityQuestionsDeprecated",
   "Requisição de recuperação inválida.": "invalidRecoveryRequest",
   "Informe a senha mestra atual para restaurar um backup.": "importRequiresMasterPassword",
   "Selecione ao menos um tipo de caractere.": "pwgenSelectCharType",
@@ -61,7 +64,41 @@ const RAW_TO_KEY: Record<string, string> = {
   "Chave de configuração desconhecida.": "unknownSettingKey",
   "O valor da configuração excede o tamanho máximo permitido.": "valueTooLong",
   "Idioma inválido.": "invalidLanguage",
+  // Mensagens de `validate::http_url_optional` (o texto exato é conferido por um teste contra validate.rs).
+  "A URL de login deve ser um endereço completo começando com https:// (ou http://), sem espaços, barras invertidas, usuário/senha ou caracteres invisíveis.": "invalidLoginUrl",
+  "A URL do site deve ser um endereço completo começando com https:// (ou http://), sem espaços, barras invertidas, usuário/senha ou caracteres invisíveis.": "invalidWebsiteUrl",
+  "Os dados de proteção do cofre estão corrompidos ou usam um formato não suportado.": "protectionCorrupt",
+  "O desbloqueio com duas senhas já está ativado.": "dualAlreadyOn",
+  "O desbloqueio com duas senhas não está ativado.": "dualNotOn",
+  "A segunda senha precisa ser diferente da primeira.": "secondSameAsFirst",
+  "A segunda senha deve ter pelo menos 8 caracteres.": "secondTooShort",
+  "A senha é longa demais.": "passwordTooLong",
+  "Nenhuma segunda senha de recuperação foi configurada para este cofre.": "recoveryPwNotConfigured",
+  "Segunda senha de recuperação incorreta.": "recoveryPwWrong",
+  "Os dados da segunda senha de recuperação estão corrompidos.": "recoveryPwCorrupt",
+  "A segunda senha de recuperação deve ter pelo menos 8 caracteres.": "recoveryPwTooShort",
+  "A senha de recuperação precisa ser diferente das senhas de desbloqueio.": "recoveryPwSameAsUnlock",
+  "A data do último login não pode estar no futuro.": "lastLoginFuture",
+  "A data do último login é inválida.": "lastLoginInvalid",
+  "Não foi possível garantir a exclusividade do cofre aberto (arquivo de controle indisponível).": "exclusivityUnavailable",
 };
+
+// Erros ESTRUTURADOS do backend: códigos estáveis (não mensagens) para o que a interface precisa
+// reagir de forma especial — `E_LOCKED:<segundos>:<falhas>`, `E_VAULT_OPEN_ELSEWHERE` e
+// `E_SECOND_PASSWORD_REQUIRED`.
+export type StructuredBackendError =
+  | { code: "locked"; seconds: number; failures: number }
+  | { code: "vault_open_elsewhere" }
+  | { code: "second_password_required" };
+
+export function parseStructuredError(raw: unknown): StructuredBackendError | null {
+  const message = String(raw).trim();
+  const locked = /^E_LOCKED:(\d+):(\d+)$/.exec(message);
+  if (locked) return { code: "locked", seconds: Number(locked[1]), failures: Number(locked[2]) };
+  if (message === "E_VAULT_OPEN_ELSEWHERE") return { code: "vault_open_elsewhere" };
+  if (message === "E_SECOND_PASSWORD_REQUIRED") return { code: "second_password_required" };
+  return null;
+}
 
 /**
  * Traduz uma mensagem de erro vinda do backend Rust (sempre em português) para o idioma ativo,
@@ -71,6 +108,17 @@ const RAW_TO_KEY: Record<string, string> = {
  */
 export function translateBackendError(t: (key: string, vars?: Record<string, string | number>) => string, raw: unknown): string {
   const message = String(raw);
+  const structured = parseStructuredError(message);
+  if (structured) {
+    switch (structured.code) {
+      case "locked":
+        return t("errors.locked", { time: formatWait(structured.seconds) });
+      case "vault_open_elsewhere":
+        return t("errors.vaultOpenElsewhere");
+      case "second_password_required":
+        return t("errors.secondPasswordRequired");
+    }
+  }
   const key = RAW_TO_KEY[message];
   return key ? t(`errors.${key}`) : message;
 }
