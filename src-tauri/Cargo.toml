@@ -37,7 +37,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = "0.4"
 sha2 = "0.10"
 sharks = { version = "0.5", features = ["zeroize_memory"] }
-hkdf = "0.12"
+hkdf = "0.13"
 rand_chacha = "0.3"
 
 # Hook nativo de lock/suspend (Fase 3 do hardening — ver src/native_lock.rs). Restrito ao alvo
