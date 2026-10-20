@@ -151,13 +151,14 @@ describe('prepareReleaseAssets', () => {
     expect(result.status).toBe(0);
   });
 
-  it.skipIf(!hasSha256sum)('sha256sum -c rejeita o mesmo manifesto quando vira CRLF (o defeito original)', () => {
+  it('o verificador estrito recusa o manifesto quando vira CRLF (o defeito original)', () => {
     const outDir = path.join(tmp(), 'out');
     prepareReleaseAssets({ bundleDir: fakeBundle(), outDir, version: '0.1.0', wixVersion: null });
     const manifestPath = path.join(outDir, MANIFEST_NAME);
     fs.writeFileSync(manifestPath, fs.readFileSync(manifestPath, 'utf8').replace(/\n/g, '\r\n'));
-    expect(spawnSync('sha256sum', ['-c', MANIFEST_NAME], { cwd: outDir }).status).not.toBe(0);
-    // ...e o nosso verificador estrito também recusa.
+    // O GNU sha256sum -c rejeita CRLF em algumas versões (ex.: o do Git Bash no Windows) e aceita em
+    // outras (coreutils 9.1 no Linux); por isso o contrato testado é o do nosso verificador, que
+    // recusa CRLF sempre.
     expect(verifyManifestDir(outDir).join()).toContain('CRLF');
   });
 

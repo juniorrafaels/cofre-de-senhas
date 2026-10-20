@@ -62,8 +62,8 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). 
 - URLs antigas inválidas não são apagadas nem reescritas: a conta continua editável nos outros
   campos (o Rust compara com o valor gravado no banco), a interface avisa que o link não será
   aberto, e só uma URL nova ou alterada passa pela validação completa.
-- Release: o `SHA256SUMS.txt` agora é gerado em LF (antes saía em CRLF e quebrava o
-  `sha256sum -c`); os instaladores são publicados com nomes sem espaços
+- Release: o `SHA256SUMS.txt` agora é gerado em LF (antes saía em CRLF, o que quebra o
+  `sha256sum -c` em algumas versões); os instaladores são publicados com nomes sem espaços
   (`Cofre-de-Contas_<versão>_x64-setup.exe`) idênticos aos do manifesto, e os arquivos
   guardados pelo GitHub são conferidos antes de publicar. Tags aceitas: `vX.Y.Z` e
   `vX.Y.Z-beta.N`; betas usam a versão completa nos manifestos e um
