@@ -3,13 +3,12 @@ use crate::commands::vault::{opt_secret, verify_credentials};
 use crate::commands::vault::verify_current_password;
 use crate::crypto::{self, KdfParams};
 use crate::db;
+use crate::shamir::{self, Share};
 use crate::state::VaultState;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
-use sharks::{Share, Sharks};
-use std::convert::TryFrom;
 use tauri::{AppHandle, State};
 use zeroize::Zeroizing;
 
@@ -36,7 +35,7 @@ const MAX_ANSWER_CHARS: usize = 1024;
 /// Tamanho máximo (em caracteres) aceito para o texto de uma pergunta.
 const MAX_QUESTION_CHARS: usize = 500;
 
-/// O dealer do `sharks` avalia o polinômio em x = 1..=255 (GF(256)): é o limite técnico duro de
+/// O dealer (`shamir::deal_v1_share`) avalia o polinômio em x = 1..=255 (GF(256)): é o limite técnico duro de
 /// quantas shares distintas existem. `MAX_QUESTIONS` (20, como no desenho original) fica bem abaixo.
 const MAX_SHARE_INDEX: i64 = 255;
 
@@ -44,7 +43,7 @@ const MAX_SHARE_INDEX: i64 = 255;
 /// Como a seed é derivada da própria DEK, o mesmo índice sempre produz o mesmo share — não é
 /// preciso guardar o polinômio nem reunir respostas antigas para adicionar/remover perguntas.
 ///
-/// Não pode entrar em pânico: o dealer do `sharks` gera no máximo 255 shares (x = 1..=255 em
+/// Não pode entrar em pânico: o dealer gera no máximo 255 shares (x = 1..=255 em
 /// GF(256)), então qualquer índice fora disso vira erro.
 fn share_for_index(dek: &[u8; 32], share_index: i64) -> Result<Vec<u8>, String> {
     if !(1..=MAX_SHARE_INDEX).contains(&share_index) {
@@ -52,12 +51,9 @@ fn share_for_index(dek: &[u8; 32], share_index: i64) -> Result<Vec<u8>, String> 
     }
     let seed = crypto::derive_deterministic_seed(dek, DEALER_CONTEXT);
     let mut rng = ChaCha20Rng::from_seed(seed);
-    let sharks = Sharks(RECOVERY_THRESHOLD);
-    let share = sharks
-        .dealer_rng(dek.as_slice(), &mut rng)
-        .nth((share_index - 1) as usize)
+    let share = shamir::deal_v1_share(dek.as_slice(), RECOVERY_THRESHOLD, share_index as u8, &mut rng)
         .ok_or_else(generic_error)?;
-    Ok(Vec::from(&share))
+    Ok(share.to_bytes())
 }
 
 fn normalize_answer(answer: &str) -> Zeroizing<String> {
@@ -443,10 +439,10 @@ fn attempt_recovery_core(conn: &rusqlite::Connection, answers: &[RecoveryAnswer]
 
         if let Some((salt, params_json, wrapped)) = row {
             if let Some(share_bytes) = try_unwrap_share(&answer.answer, &salt, &params_json, &wrapped) {
-                if let Ok(share) = Share::try_from(share_bytes.as_slice()) {
+                if let Some(share) = Share::from_bytes(share_bytes.as_slice()) {
                     // Duas shares com o mesmo x (só possível com um banco/backup forjado, já que
                     // `share_index` é UNIQUE) entrariam duplicadas na interpolação de Lagrange do
-                    // `sharks` e corromperiam o resultado. Mantém só a primeira de cada x.
+                    // `shamir::recover` e corromperiam o resultado. Mantém só a primeira de cada x.
                     if seen_x.insert(share_bytes[0]) {
                         collected_shares.push(share);
                     }
@@ -466,8 +462,7 @@ fn attempt_recovery_core(conn: &rusqlite::Connection, answers: &[RecoveryAnswer]
         });
     }
 
-    let sharks = Sharks(RECOVERY_THRESHOLD);
-    let recovered = sharks.recover(collected_shares.iter());
+    let recovered = shamir::recover(&collected_shares, RECOVERY_THRESHOLD);
 
     let dek_bytes = match recovered {
         Ok(bytes) if bytes.len() == 32 => bytes,
@@ -579,6 +574,71 @@ pub fn compute_dek_check(dek: &[u8; 32]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DEK e shares geradas pelo código ANTERIOR (crate `sharks` 0.5.0 + ChaCha20 seedado por
+    /// HKDF da DEK), capturadas antes da remoção da crate. Representam perguntas já gravadas em
+    /// cofres existentes: `share_for_index` precisa continuar produzindo EXATAMENTE estes bytes
+    /// (é o que mantém novas perguntas no mesmo polinômio das antigas) e a recuperação precisa
+    /// reconstruir a DEK a partir deles.
+    const LEGACY_DEK: [u8; 32] = {
+        let mut dek = [0u8; 32];
+        let mut i = 0;
+        while i < 32 {
+            dek[i] = (i as u8).wrapping_mul(7).wrapping_add(3);
+            i += 1;
+        }
+        dek
+    };
+    const LEGACY_SHARES: [(i64, &str); 6] = [
+        (1, "01855df94a90744b23d3e9a2dad17d6de1e538b7cdea4d5cdc8bca4459d05edcf7"),
+        (2, "0298394cc43eb363dbb3db8dde4717ad66175c3a8daaee3a77eaae40f98170ef04"),
+        (3, "031e6ea496b1e105cc5b706654c134a5eb811e0cc8cf35fb0fcad6bd6096e0e62f"),
+        (4, "043a22d140d5d583d43f02e07773f0af4cf28491845e0d2e932d1d2eeaf6990173"),
+        (20, "14735cf2ed868c8b7cf7fe649c8368a6165a4dcde4d4da2d736fd27c51ac32cdc5"),
+        (255, "ff84a4dd38aadc43b4b5d58116866e3d30dae92ddd8166f5d3b6f8d1f8aa9d1d36"),
+    ];
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn share_for_index_still_produces_the_bytes_stored_by_previous_versions() {
+        for (index, hex) in LEGACY_SHARES {
+            assert_eq!(share_for_index(&LEGACY_DEK, index).unwrap(), from_hex(hex), "índice {index}");
+        }
+    }
+
+    #[test]
+    fn previously_stored_shares_reconstruct_the_dek_and_mix_with_newly_dealt_ones() {
+        let stored: Vec<Share> = LEGACY_SHARES
+            .iter()
+            .take(3)
+            .map(|(_, hex)| Share::from_bytes(&from_hex(hex)).unwrap())
+            .collect();
+        assert_eq!(shamir::recover(&stored, RECOVERY_THRESHOLD).unwrap(), LEGACY_DEK.to_vec());
+
+        // uma pergunta adicionada hoje (índice 5, 6, ...) convive com as antigas (1 e 2)
+        let mixed: Vec<Share> = [
+            from_hex(LEGACY_SHARES[0].1),
+            from_hex(LEGACY_SHARES[1].1),
+            share_for_index(&LEGACY_DEK, 5).unwrap(),
+        ]
+        .iter()
+        .map(|b| Share::from_bytes(b).unwrap())
+        .collect();
+        assert_eq!(shamir::recover(&mixed, RECOVERY_THRESHOLD).unwrap(), LEGACY_DEK.to_vec());
+
+        // duas shares são insuficientes
+        assert!(shamir::recover(&stored[..2], RECOVERY_THRESHOLD).is_err());
+    }
+
+    #[test]
+    fn share_index_bounds_are_enforced() {
+        assert!(share_for_index(&LEGACY_DEK, 0).is_err());
+        assert!(share_for_index(&LEGACY_DEK, 256).is_err());
+        assert!(share_for_index(&LEGACY_DEK, 255).is_ok());
+    }
 
     // Parâmetros reduzidos apenas para os testes rodarem rápido (mesmo padrão de
     // `vault::tests::fixture_conn_with_password`/`crypto::tests::test_params`); produção usa

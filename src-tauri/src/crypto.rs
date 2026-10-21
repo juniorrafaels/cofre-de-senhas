@@ -276,9 +276,22 @@ pub fn normalize_recovery_key(input: &str) -> String {
     input.chars().filter(|c| !c.is_whitespace() && *c != '-').collect::<String>().to_uppercase()
 }
 
+/// SHA-256 de `data` em hexadecimal minúsculo (64 caracteres). Os nomes das imagens e o hash de
+/// reparo do logotipo dependem deste formato exato.
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_hex_is_lowercase_and_matches_the_standard_vectors() {
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
 
     // Testes de regressão de segurança (SECURITY_AUDIT.md, seção 5 e 30): validam as
     // propriedades criptográficas de que a auditoria depende — nenhuma senha/segredo em

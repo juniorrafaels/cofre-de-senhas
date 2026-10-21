@@ -198,3 +198,50 @@ Tabela (falhas consecutivas → espera): 1 → 15 s · 2 → 30 s · 3 → 1 min
   `docs/TESTES_MANUAIS.md` para os passos manuais com o app aberto.
 * Exclusividade entre processos: testada com processos reais **no Windows**; Linux/macOS não testados.
 * Vestígios de dados antigos no disco (WAL, páginas livres, SSD) não são tratados por estas opções.
+
+## Perguntas de segurança: o Shamir do Cofre (dealer v1, congelado)
+
+As shares das perguntas são calculadas **de forma determinística a partir da DEK**
+(`share_for_index`: seed = HKDF-SHA256(DEK, contexto), ChaCha20, polinômios de grau 2 sobre
+GF(2^8), um por byte da DEK, limiar 3, shares em x = 1..=255). Por isso adicionar ou remover uma
+pergunta recalcula a share do índice sem precisar das respostas antigas — mas também significa que
+**toda share nova precisa cair exatamente no mesmo polinômio das gravadas**.
+
+### Alerta do `sharks` (RUSTSEC-2024-0398 / GHSA-jp37-5qhw-mffw)
+
+* **Causa:** `sharks` ≤ 0.5.0 sorteia os coeficientes aleatórios em `[1, 255]` em vez de `[0, 255]`.
+  Quem vê uma share a menos que o limiar pode descartar candidatos ao segredo (um coeficiente nulo
+  seria impossível). Segundo o advisory (Cure53), a exploração exige o **mesmo segredo repartido
+  centenas de vezes (≈ 500–1500)** com polinômios independentes. A reconstrução **não é afetada**.
+* **No Cofre:** o polinômio é derivado da DEK e é sempre o mesmo para uma DEK; não existem
+  repartições independentes do mesmo segredo, e rotacionar a DEK cria outro segredo. Com 2 de 3
+  shares conhecidas, o viés elimina no máximo 2 de 256 candidatos por byte (≈ 0,0113 bit por byte,
+  ≈ 0,36 bit em 256). Além disso, cada share fica cifrada por uma chave derivada de uma resposta.
+  O risco prático continua sendo a previsibilidade das respostas (ver `SECURITY.md`).
+* **Por que não trocar por outra crate:** não existe versão corrigida de `sharks`; o fork
+  `blahaj` sorteia em `[0, 255]`, o que produz **outro polinômio** para a mesma DEK. Um cofre com
+  perguntas antigas que adicionasse uma pergunta nova passaria a misturar shares de dois
+  polinômios e a recuperação devolveria uma DEK errada (há teste que demonstra isso). Regerar as
+  shares antigas exigiria as respostas antigas, que o app não guarda.
+* **O que foi feito:** a crate foi removida e o algoritmo vive em `src-tauri/src/shamir.rs`
+  (corpo GF(2^8) com polinômio 0x11d, avaliação de Horner, interpolação de Lagrange). O dealer
+  **v1** reproduz bit a bit o do `sharks` 0.5.0, incluindo o consumo do RNG; a recuperação também
+  recusa abscissas repetidas e shares de tamanhos diferentes. Compatibilidade verificada por:
+  teste diferencial contra o `sharks` (todos os x, seeds, tamanhos de segredo e limiares) executado
+  antes da remoção; vetores gravados do `sharks` e do `share_for_index` antigo
+  (`security_questions::tests`, `shamir::tests`); e os testes existentes de adicionar/editar/
+  remover perguntas e recuperar.
+* **Formato persistido:** inalterado (`wrapped_share = XChaCha20-Poly1305(chave da resposta,
+  [x, y0..y31])`; nenhuma migração). Cofres e backups existentes seguem válidos.
+* **Proposta para o futuro (não implementada):** um *dealer v2* com coeficientes em `[0, 255]` só
+  pode valer para perguntas **criadas depois** de um marcador de versão persistido
+  (`vault_meta`), com migração de esquema e convivência explícita v1/v2 por cofre; como o viés v1
+  não é explorável neste desenho, a decisão fica com o mantenedor.
+
+### Dependências que fixam o formato
+
+`rand` 0.8 e `rand_chacha` 0.3 geram o fluxo de coeficientes do dealer v1 (o sorteio uniforme em
+`[1, 255]` e o ChaCha20). As versões 0.10 usam `rand_core` 0.10 e não compilam com o código atual
+(`from_seed`, `OsRng`, `thread_rng`, `gen_range` mudaram) e, mesmo compilando, o algoritmo de
+amostragem uniforme pode diferir. Qualquer migração precisa passar nos vetores gravados antes de
+ser aceita; ver `.github/dependabot.yml`.

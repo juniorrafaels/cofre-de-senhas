@@ -1,10 +1,7 @@
 # Configuração do `cargo audit` (RustSec). Cada exceção abaixo é uma decisão consciente,
 # documentada em SECURITY.md. Revise a cada release.
 [advisories]
-ignore = [
-    # sharks 0.5.0 — viés nos coeficientes do polinômio do Shamir (sem versão corrigida).
-    # Usado na recuperação por perguntas de segurança (recurso opcional, criar/editar/recuperar em
-    # security_questions.rs). Riscos e impacto documentados em SECURITY.md. Só remover se o
-    # mecanismo for substituído por decisão do proprietário.
-    "RUSTSEC-2024-0398",
-]
+# Sem exceções no momento. A de `sharks` (RUSTSEC-2024-0398) foi removida junto com a crate.
+# `glib` (RUSTSEC-2024-0429, só Linux, transitiva do Tauri) aparece como aviso de "unsound" e
+# não falha o `cargo audit`; está documentada em SECURITY.md e fica visível de propósito.
+ignore = []

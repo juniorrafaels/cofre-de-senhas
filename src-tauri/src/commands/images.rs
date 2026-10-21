@@ -1,9 +1,9 @@
+use crate::crypto;
 use crate::db;
 use crate::state::VaultState;
 use crate::validate;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
@@ -86,9 +86,7 @@ pub fn import_image(app: AppHandle, state: State<VaultState>, source_path: Strin
     let source = PathBuf::from(&source_path);
     let bytes = fs::read(&source).map_err(|_| "Não foi possível ler o arquivo de imagem.".to_string())?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = crypto::sha256_hex(&bytes);
 
     // Restringe a extensão a caracteres alfanuméricos: mesmo vindo do path escolhido pelo próprio
     // usuário no diálogo de arquivos, não deixamos nada além de [a-z0-9] entrar no nome final
