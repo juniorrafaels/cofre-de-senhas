@@ -1,5 +1,4 @@
 use rusqlite::{Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::path::BaseDirectory;
@@ -654,9 +653,7 @@ fn provision_default_platform_images_at(resource_root: &Path, images_dir: &Path,
             Err(_) => continue,
         };
 
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = crate::crypto::sha256_hex(&bytes);
 
         let pending = status.as_deref() == Some("provisioned_pending_image");
         if !pending {
