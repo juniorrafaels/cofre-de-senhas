@@ -7,6 +7,7 @@ mod instance_lock;
 mod lockout;
 mod migration;
 mod native_lock;
+mod shamir;
 mod state;
 mod validate;
 
