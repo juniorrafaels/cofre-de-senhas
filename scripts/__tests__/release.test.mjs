@@ -101,9 +101,11 @@ describe('checkVersions', () => {
     }
   });
 
-  it('estado atual do repositório: v0.1.0-beta.3 confere; outras tags exigem preparar a versão antes', () => {
-    expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.3'))).toEqual([]);
+  it('estado atual do repositório: v0.1.0-beta.4 confere; outras tags exigem preparar a versão antes', () => {
+    expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.4'))).toEqual([]);
     expect(checkVersions(repoRoot, parseTag('v0.1.0')).length).toBeGreaterThan(0);
+    // a beta.3 já foi publicada: o repositório não pode mais casar com ela
+    expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.3')).length).toBeGreaterThan(0);
     expect(checkVersions(repoRoot, parseTag('v0.1.0-beta.2')).length).toBeGreaterThan(0);
   });
 });

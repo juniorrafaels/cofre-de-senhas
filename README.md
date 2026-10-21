@@ -193,10 +193,14 @@ todas as perguntas em Configurações (exige a senha mestra atual). Funciona **t
   - Mais perguntas podem dificultar, mas **não** garantem uma quantidade específica de entropia.
   - Uma **Recovery Key** aleatória (120 bits) tem propriedades de segurança diferentes e mais fortes
     do que respostas escolhidas por uma pessoa.
-  - `sharks` 0.5.0 tem o aviso RUSTSEC-2024-0398 (coeficientes do polinômio sorteados em 1..=255,
-    nunca 0). Pelo código da crate, o viés é pequeno e, neste app, os coeficientes vêm de um
-    ChaCha20 semeado pela própria DEK; o elo fraco prático são as respostas, não esse viés. Não foi
-    feita análise formal do impacto. A crate aparenta não ter manutenção.
+  - A crate `sharks` (RUSTSEC-2024-0398: coeficientes do polinômio sorteados em 1..=255, nunca 0)
+    foi **removida**; o app usa `src-tauri/src/shamir.rs`, compatível bit a bit com as shares já
+    gravadas. O sorteio com o viés foi mantido de propósito nos cofres existentes (trocá-lo
+    quebraria a recuperação de quem já tem perguntas). O ataque do advisory exige o mesmo segredo
+    compartilhado centenas de vezes com polinômios independentes; aqui o polinômio é derivado da
+    própria DEK e é sempre o mesmo. Com 2 de 3 shares conhecidas, o viés elimina no máximo 2 de 256
+    candidatos por byte (cerca de 0,36 bit no total, em 256): irrelevante frente ao elo fraco
+    prático, que são as respostas. Detalhes em `docs/CREDENCIAIS_E_RECUPERACAO.md`.
 - **Se você perder a senha mestra** e não tiver Recovery Key nem pelo menos 3 respostas corretas
   entre as perguntas sorteadas, os dados são perdidos definitivamente.
 - **Cofres já existentes** com perguntas continuam funcionando sem migração, e os backups

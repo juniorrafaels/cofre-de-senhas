@@ -21,6 +21,15 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # rand/rand_chacha fixam o fluxo de coeficientes do Shamir das perguntas de segurança
+      # (dealer v1, shares já gravadas em cofres existentes). A 0.10 exige migração conjunta e
+      # reescrita dos usos de OsRng/gen_range, e só pode ser aceita se os vetores de
+      # security_questions/shamir continuarem passando. Ver docs/CREDENCIAIS_E_RECUPERACAO.md.
+      - dependency-name: "rand"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "rand_chacha"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: github-actions
     directory: "/"

@@ -6,6 +6,37 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). 
 
 ## [Não lançado]
 
+## [0.1.0-beta.4] - 2026-10-21
+
+Correções de segurança de dependências e atualização das dependências propostas pelo Dependabot.
+A `v0.1.0-beta.3` não foi alterada.
+
+### Segurança
+- **Removida a crate `sharks`** (RUSTSEC-2024-0398 / GHSA-jp37-5qhw-mffw, viés nos coeficientes do
+  polinômio de Shamir; sem versão corrigida). O Shamir das perguntas de segurança passou para
+  `src-tauri/src/shamir.rs`, **compatível bit a bit** com as shares já gravadas: o formato
+  persistido não mudou, não há migração e cofres/backups existentes continuam válidos. A análise
+  de impacto e o porquê de o sorteio v1 ter sido mantido estão em
+  `docs/CREDENCIAIS_E_RECUPERACAO.md`. A exceção do `cargo audit` para esse aviso foi removida.
+- **`glib` (RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g)**: não corrigível por atualização. É
+  transitiva do Tauri (gtk 0.18), só compilada em Linux, não usada pelo app e ausente da build
+  Windows; as últimas versões de `tao`/`wry` ainda fixam `gtk ^0.18`. Documentado em `SECURITY.md`.
+- A recuperação por Shamir agora recusa abscissas repetidas e shares de tamanhos diferentes na
+  própria interpolação.
+
+### Alterado
+- Tauri 2.12 (crates e pacotes npm), `windows` 0.62 (o `HWND` do Tauri 2.12 vem da 0.62),
+  `hkdf` 0.13 + `sha2` 0.11 (precisam subir juntos), `thiserror` 2, Vite 8 +
+  `@vitejs/plugin-react` 6 (precisam subir juntos), TypeScript 7 e as demais atualizações
+  minor/patch de npm e Cargo.
+- O hexadecimal SHA-256 de imagens passa por `crypto::sha256_hex` (mesmo formato minúsculo).
+- `rand` 0.8 e `rand_chacha` 0.3 ficam fixados de propósito (fluxo de coeficientes do Shamir);
+  o Dependabot ignora as versões 0.9+ até haver migração testada.
+
+### Testes
+- Vetores gravados do Shamir antigo, testes de mistura de shares antigas e novas, limiares,
+  subconjuntos, duplicatas e tamanhos incompatíveis (`shamir::tests`, `security_questions::tests`).
+
 ## [0.1.0-beta.3] - 2026-10-20
 
 A tag `v0.1.0-beta.2` foi criada, mas o workflow falhou ao reunir os instaladores (o MSI do Tauri leva a versão completa no nome, não a numérica) e nenhuma release foi publicada; esta versão contém a correção.

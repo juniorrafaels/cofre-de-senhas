@@ -208,10 +208,14 @@ todas as perguntas em Configurações (exige a senha mestra atual). Funciona **t
   - Mais perguntas podem dificultar, mas **não** garantem uma quantidade específica de entropia.
   - Uma **Recovery Key** aleatória (120 bits) tem propriedades de segurança diferentes e mais fortes
     do que respostas escolhidas por uma pessoa.
-  - `sharks` 0.5.0 tem o aviso RUSTSEC-2024-0398 (coeficientes do polinômio sorteados em 1..=255,
-    nunca 0). Pelo código da crate, o viés é pequeno e, neste app, os coeficientes vêm de um
-    ChaCha20 semeado pela própria DEK; o elo fraco prático são as respostas, não esse viés. Não foi
-    feita análise formal do impacto. A crate aparenta não ter manutenção.
+  - A crate `sharks` (RUSTSEC-2024-0398: coeficientes do polinômio sorteados em 1..=255, nunca 0)
+    foi **removida**; o app usa `src-tauri/src/shamir.rs`, compatível bit a bit com as shares já
+    gravadas. O sorteio com o viés foi mantido de propósito nos cofres existentes (trocá-lo
+    quebraria a recuperação de quem já tem perguntas). O ataque do advisory exige o mesmo segredo
+    compartilhado centenas de vezes com polinômios independentes; aqui o polinômio é derivado da
+    própria DEK e é sempre o mesmo. Com 2 de 3 shares conhecidas, o viés elimina no máximo 2 de 256
+    candidatos por byte (cerca de 0,36 bit no total, em 256): irrelevante frente ao elo fraco
+    prático, que são as respostas. Detalhes em `docs/CREDENCIAIS_E_RECUPERACAO.md`.
 - **Se você perder a senha mestra** e não tiver Recovery Key nem pelo menos 3 respostas corretas
   entre as perguntas sorteadas, os dados são perdidos definitivamente.
 - **Cofres já existentes** com perguntas continuam funcionando sem migração, e os backups
@@ -219,8 +223,18 @@ todas as perguntas em Configurações (exige a senha mestra atual). Funciona **t
 
 ### Dependências com avisos conhecidos
 
-- `sharks` 0.5.0 — RUSTSEC-2024-0398 (viés nos coeficientes do Shamir, sem correção). Usado
-  na recuperação por perguntas de segurança (criar, editar e recuperar). Ignorado de propósito em
-  `src-tauri/.cargo/audit.toml`; só pode sair se o mecanismo mudar (decisão do proprietário).
-- Crates transitivas do Tauri marcadas como sem manutenção (`unic-*`, `proc-macro-error`) e
-  `glib` (só Linux). Nenhuma afeta a build Windows em execução.
+- `sharks` — RUSTSEC-2024-0398 (GHSA-jp37-5qhw-mffw): **removida** (substituída por
+  `src-tauri/src/shamir.rs`, ver acima). A exceção em `audit.toml` foi apagada, então o
+  `cargo audit` volta a acusar qualquer vulnerabilidade nova.
+- `glib` 0.18.5 — RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g (`glib::VariantStrIter` unsound em
+  `>= 0.15.0, < 0.20.0`). É dependência **transitiva** (`tauri` → `tao`/`wry` → `gtk` 0.18) e só é
+  compilada em **Linux/BSD**; o app é distribuído apenas para Windows (MSI/NSIS), onde `glib` não
+  entra no binário (`cargo tree -i glib` no alvo Windows não encontra o pacote). O código do app
+  não usa `glib`. Não há como atualizar: a versão corrigida (≥ 0.20) pertence a outra geração do
+  gtk-rs, e até o `tao` 0.37 e o `wry` 0.57 (últimas versões na data desta mudança) fixam
+  `gtk ^0.18` e `webkit2gtk =2.0.2`. Resolver exigiria um fork do Tauri ou migrar para a série
+  nova do gtk-rs quando o Tauri o fizer. Acompanhe o upstream e revise a cada release.
+- Crates transitivas do Tauri marcadas como sem manutenção (`unic-*`, `proc-macro-error`,
+  `zbus_names`/`zvariant*`). `proc-macro-error` e `zvariant`/`zbus` não entram na build Windows
+  (`cargo tree -i <crate> --target x86_64-pc-windows-msvc` não as encontra); `cargo audit` as
+  mostra como aviso, sem falhar.

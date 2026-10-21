@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 description = "Cofre de Contas - gerenciador de senhas local e offline (backend Tauri/Rust)"
 license = "Apache-2.0"
 edition = "2021"
