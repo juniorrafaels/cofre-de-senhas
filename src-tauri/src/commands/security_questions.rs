@@ -1340,4 +1340,3 @@ mod tests {
         assert!(crate::commands::vault::unlock_vault_core(&conn, &VaultState::new(), &pw("senha-mestra")).is_err());
     }
 }
-
